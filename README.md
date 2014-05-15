@@ -1,14 +1,30 @@
-# dynohub
+# Dynohub, a Clojure DynamoDB client
 
-A Clojure library designed to ... well, that part is up to you.
+Dynohub was forked from Peter Taoussanis' [Faraday](https://github.com/ptaoussanis/faraday).
 
-## Usage
+The most of internal details are same between Dynohub and Faraday except Dynohub provides an abstraction layer to deal with [DynamoDB](http://aws.amazon.com/dynamodb/).
 
-FIXME
+Most parts of Faraday documentation can be served as Dynohub documentation.
+
+## Getting started
+
+### Dependencies
+
+Add the necessary dependency to your [Leiningen][] `project.clj` and `require` the library in your ns:
+
+```clojure
+[com.pegotezzi/dynohub "0.0.1"] ; project.clj
+(ns my-app (:require [pegotezzi.dynohub :as dh])) ; ns
+```
+
+### Preparing a database
+
+See Faraday's [Preparing a database](https://github.com/ptaoussanis/faraday#preparing-a-database)
+
+### Connecting
+
+See Faraday's [Connecting](https://github.com/ptaoussanis/faraday#connecting)
 
 ## License
 
-Copyright © 2014 FIXME
-
-Distributed under the Eclipse Public License either version 1.0 or (at
-your option) any later version.
+Copyright &copy; 2014 Jong-won Choi. Distributed under the [Eclipse Public License][], the same as Clojure.
