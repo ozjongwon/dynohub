@@ -2,7 +2,9 @@
 
 Dynohub was forked from Peter Taoussanis' [Faraday](https://github.com/ptaoussanis/faraday).
 
-The most of internal details are same between Dynohub and Faraday except Dynohub provides an abstraction layer to deal with [DynamoDB](http://aws.amazon.com/dynamodb/).
+The most of internal details are same between Dynohub and Faraday, except:
+	* Experimental to learn low level Clojure programming
+	* Further abstraction layers
 
 Most parts of Faraday documentation can be served as Dynohub documentation.
 
