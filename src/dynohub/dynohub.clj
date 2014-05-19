@@ -136,6 +136,14 @@
         (and (contains? #{BigInt BigDecimal BigInteger} type)
              (<= (get-bignum-precision x) 38)))))
 
+(defn- str->dynamo-db-num [^String s]
+  ;; This assumes the given s is a well formed passive number string
+  ;; so no need   (binding [*read-eval* false]
+  (let [n (read-string s)]
+    (if (number? n)
+      n
+      (throw (Exception. (str "Invalid number type value " s "from DynamoDB!"))))))
+
 (defmacro doto-cond "My own version of doto-cond"
   [exp & clauses]
   (assert (even? (count clauses)))
@@ -266,7 +274,7 @@
                                      (vector? projection) [:include (mapv name projection)]
                                      :else (error "Unknown projection type(and value): " projection))))
 
-(defmethod make-DynamoDB-parts :global-secondary-indexes [gsindexes]
+(defmethod make-DynamoDB-parts :global-secondary-indexes [_ gsindexes]
   (->> gsindexes
        (map (fn [{:keys [name hash-keydef range-keydef projection throughput] :or {projection :all} :as index}]
               (assert (and name hash-keydef range-keydef projection throughput)
@@ -277,6 +285,11 @@
                (make-DynamoDB-parts :projection projection)
                (make-DynamoDB-parts :provisioned-throughput throughput)]))
        (clojure->java-using-mapv (GlobalSecondaryIndex.))))
+
+(defmethod make-DynamoDB-parts :attribute-values [_ prim-kvs]
+  (maphash (fn [[k v]]
+             [(name k) (clojure->java (AttributeValue.) v)])
+           prim-kvs))
 
 ;;
 ;;FIXME:
@@ -361,7 +374,49 @@
   GlobalSecondaryIndexDescription
   (java->clojure [d] (inline-secondary-index-description-result d :throughput? true))
 
+  AttributeValue
+  (clojure->java [a v] (assert (not (empty? v)) (str "Invalid DynamoDB value: empty string or set: " v))
+    (cond
+     ;; s
+     (string? v) (doto a (.setS v))
+     ;; n
+     (dynamo-db-number? v) (doto a (.setN (str v)))
 
+     (set? v) (cond
+               ;; ss
+               (every? string? v) (doto a (.setSS (vec v)))
+               ;; ns
+               (every? dynamo-db-number? v) (doto a (.setNS (mapv str  v)))
+               ;; bs
+               ;; FIXME: freeze
+               ;;:else (doto (AttributeValue.) (.setBS (mapv nt-freeze v))))
+               :else (doto a (.setBS (mapv str v))))
+;;     (instance? AttributeValue v) v
+
+     ;; b
+     ;; FIXME: freeze
+     ;;:else (doto (AttributeValue.) (.setB (nt-freeze v)))))
+     :else (doto a (.setB v))))
+  (java->clojure [av] (or (.getS av)
+                          (some->> (.getN  av) str->dynamo-db-num)
+                          (some->> (.getSS av) (into #{}))
+                          (some->> (.getNS av) (mapv str->dynamo-db-num) (into #{}))
+                          ;;(some->> (.getBS av) (mapv nt-thaw) (into #{}))
+                          ;; FIXME: nt-thaw
+                          (some->> (.getBS av) (mapv str) (into #{}))
+                          ;; FIXME: nt-thaw
+                          ;;(some->> (.getB  av) nt-thaw)) ; Last, may be falsey
+                          (some->> (.getB  av) #(do "av"))) ; Last, may be falsey
+      )
+
+  ConsumedCapacity
+  (java->clojure [cc] (some-> cc (.getCapacityUnits)))
+
+  GetItemResult
+  (java->clojure [r] (with-meta (maphash (fn [[k v]]
+                                           [(keyword k) (java->clojure v)])
+                                         (.getItem r))
+                       {:cc-units (java->clojure (.getConsumedCapacity r))}))
 
   )
 
@@ -406,3 +461,18 @@
 
 (defn delete-table [client-opts table]
   (java->clojure (.deleteTable (db-client client-opts) (DeleteTableRequest. (name table)))))
+
+(defn get-item
+  "Retrieves an item from a table by its primary key with options:
+    prim-kvs     - {<hash-key> <val>} or {<hash-key> <val> <range-key> <val>}.
+    :attrs       - Attrs to return, [<attr> ...].
+    :consistent? - Use strongly (rather than eventually) consistent reads?"
+  [client-opts table prim-kvs & {:keys [attrs consistent? return-cc?]}]
+  (java->clojure (.getItem (db-client client-opts)
+                           (doto-cond (GetItemRequest.)
+                                      true              (.setTableName (name table))
+                                      true              (.setKey (make-DynamoDB-parts :attribute-values prim-kvs))
+                                      consistent?       (.setConsistentRead consistent?)
+                                      attrs             (.setAttributesToGet (mapv name attrs))
+                                      return-cc?        (.setReturnConsumedCapacity
+                                                         (keyword->DynamoDB-enum-str :total))))))
