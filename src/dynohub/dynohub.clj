@@ -248,10 +248,10 @@
 (defmethod make-DynamoDB-parts :attribute-definitions [_  hash-keydef range-keydef lsindexes gsindexes]
   (->> `[~@hash-keydef ~@range-keydef ~@(mapcat :range-keydef lsindexes)
          ~@(mapcat :hash-keydef gsindexes) ~@(mapcat :range-keydef gsindexes)]
-       (mapcat (fn [[n t :as def]]
-                 (assert (t #{:s :n :b :ss :ns :bs}) (str "Invalid keydef: " def))
-                 [n t]))
        (apply hash-map)
+       (mapv (fn [[n t :as def]]
+               (assert (t #{:s :n :b :ss :ns :bs}) (str "Invalid keydef: " def))
+               [n t]))
        (clojure->java-using-mapv (AttributeDefinition.))))
 
 (defmethod make-DynamoDB-parts :local-secondary-indexes [_ hash-keydef lsindexes]
