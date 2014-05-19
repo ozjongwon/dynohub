@@ -137,12 +137,12 @@
              (<= (get-bignum-precision x) 38)))))
 
 (defmacro doto-cond "My own version of doto-cond"
-  [[name exp] & clauses]
+  [exp & clauses]
   (assert (even? (count clauses)))
   (let [g (gensym)
         sexps (map (fn [[cond sexp]]
                      (if (symbol? cond)
-                       `(when-let [~name ~cond]
+                       `(when ~cond
                           (~(first sexp) ~g ~@(rest sexp)))
                        `(~(first sexp) ~g ~@(rest sexp))))
                    (partition 2 clauses))]
@@ -183,15 +183,15 @@
                 access-key (BasicAWSCredentials. access-key secret-key)
                 :else      (DefaultAWSCredentialsProviderChain.)))
              client-config
-             (doto-cond [g (ClientConfiguration.)]
-               proxy-host      (.setProxyHost         g)
-               proxy-port      (.setProxyPort         g)
-               conn-timeout    (.setConnectionTimeout g)
-               max-conns       (.setMaxConnections    g)
-               max-error-retry (.setMaxErrorRetry     g)
-               socket-timeout  (.setSocketTimeout     g))]
-         (doto-cond [g (AmazonDynamoDBClient. (or provider aws-creds) client-config)]
-           endpoint (.setEndpoint g)))))))
+             (doto-cond (ClientConfiguration.)
+               proxy-host      (.setProxyHost         proxy-host)
+               proxy-port      (.setProxyPort         proxy-port)
+               conn-timeout    (.setConnectionTimeout conn-timeout)
+               max-conns       (.setMaxConnections    max-conns)
+               max-error-retry (.setMaxErrorRetry     max-error-retry)
+               socket-timeout  (.setSocketTimeout     socket-timeout))]
+         (doto-cond (AmazonDynamoDBClient. (or provider aws-creds) client-config)
+           endpoint (.setEndpoint endpoint)))))))
 
 (defn- db-client ^AmazonDynamoDBClient [client-opts] (db-client* client-opts))
 
@@ -316,7 +316,7 @@
                                   (.setProjection p)))
 
   Projection
-  (clojure->java [p [pt attrs]] (doto-cond [_ p]
+  (clojure->java [p [pt attrs]] (doto-cond p
                                    true  (.setProjectionType pt)
                                    (and (= pt :include) attrs) (.setNonKeyAttributes pr attrs)))
 
@@ -389,7 +389,7 @@
   (let [table-name (name table-name)
         client (db-client client-opts)
         result (.createTable client
-                  (doto-cond [_ (CreateTableRequest.)]
+                  (doto-cond (CreateTableRequest.)
                      true (.setTableName table-name)
                      true (.setKeySchema (make-DynamoDB-parts :key-schema-elements
                                                               hash-keydef range-keydef))
