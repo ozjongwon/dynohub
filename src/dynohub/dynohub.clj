@@ -1,5 +1,7 @@
 (ns pegotezzi.dynohub
-  "doc"
+  "Clojure DynamoDB client. This experimental project started from Faraday by Peter Taoussanis.
+  Ref. https://github.com/ptaoussanis/faraday (Faraday),
+       http://goo.gl/22QGA (DynamoDBv2 API)"
   {:author "Jong-won Choi"}
   (:require [clojure.string         :as str]
             ;; [taoensso.encore        :as encore :refer (doto-cond)]
@@ -200,6 +202,22 @@
 (defn- db-client ^AmazonDynamoDBClient [client-opts] (db-client* client-opts))
 
 ;;;
+;;; Simple binary reader/writer
+;;;
+(defn- sexp->str [sexp]
+  (binding [*print-dup* true]
+    (print-str sexp)))
+
+(defn- byte-buffer->sexp [^ByteBuffer buf]
+  (binding [*read-eval* false]
+    (-> (.array buf)
+        (String.)
+        (read-string))))
+
+(def ^:dynamic *binary-writer* sexp->str)
+(def ^:dynamic *binary-reader* byte-buffer->sexp)
+
+;;;
 ;;; DynamoDB interface
 ;;;
 
@@ -378,35 +396,36 @@
   (clojure->java [a v] (assert (not (empty? v)) (str "Invalid DynamoDB value: empty string or set: " v))
     (cond
      ;; s
-     (string? v) (.setS a v)
+     (string? v) (doto a (.setS v))
      ;; n
-     (dynamo-db-number? v) (.setN a (str v))
+     (dynamo-db-number? v) (doto a (.setN (str v)))
 
      (set? v) (cond
                ;; ss
-               (every? string? v) (.setSS a (vec v))
+               (every? string? v) (doto a (.setSS (vec v)))
                ;; ns
-               (every? dynamo-db-number? v) (.setNS a (mapv str  v))
+               (every? dynamo-db-number? v) (doto a (.setNS (mapv str  v)))
                ;; bs
                ;; FIXME: freeze
-               ;;:else (doto (AttributeValue.) (.setBS (mapv nt-freeze v))))
-               :else (.setBS a (mapv str v)))
-;;     (instance? AttributeValue v) v
+               :else (doto (AttributeValue.) (.setBS (mapv *binary-writer* v))))
+               ;;:else (doto a (.setBS (mapv str v))))
+     ;;     (instance? AttributeValue v) v
 
      ;; b
      ;; FIXME: freeze
-     ;;:else (doto (AttributeValue.) (.setB (nt-freeze v)))))
-     :else (.setB a v)))
+     :else (doto (AttributeValue.) (.setB (*binary-writer* v)))))
+     ;;:else (doto a (.setB v))))
+
   (java->clojure [av] (or (.getS av)
                           (some->> (.getN  av) str->dynamo-db-num)
                           (some->> (.getSS av) (into #{}))
                           (some->> (.getNS av) (mapv str->dynamo-db-num) (into #{}))
-                          ;;(some->> (.getBS av) (mapv nt-thaw) (into #{}))
+                          (some->> (.getBS av) (mapv *binary-reader*) (into #{}))
                           ;; FIXME: nt-thaw
-                          (some->> (.getBS av) (mapv str) (into #{}))
+                          ;;(some->> (.getBS av) (mapv str) (into #{}))
                           ;; FIXME: nt-thaw
-                          ;;(some->> (.getB  av) nt-thaw)) ; Last, may be falsey
-                          (some->> (.getB  av) #(do "av"))) ; Last, may be falsey
+                          (some->> (.getB  av) *binary-reader*)) ; Last, may be falsey
+                          ;;(some->> (.getB  av) #(do "av"))) ; Last, may be falsey
       )
 
   ConsumedCapacity
