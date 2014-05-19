@@ -157,10 +157,6 @@
         (assert (vector? args#))
         (mapv #(clojure->java ~sexp %) args#))))
 
-(defn partial-right [f & args]
-  (fn [& next-args]
-    (apply f (concat next-args args))))
-
 ;;;;;;;;;;;;;;;;;;;;;
 (def ^:private db-client*
   "Returns a new AmazonDynamoDBClient instance for the supplied client opts:
@@ -287,14 +283,16 @@
 ;;      DOTO make binary converter flexible
 ;;
 (extend-protocol Java<->Coljure
+  nil (java->clojure [_] nil)
+
   java.util.ArrayList (java->clojure [a] (mapv java->clojure a))
 
   CreateTableResult
   (java->clojure [r] (java->clojure (.getTableDescription r)))
 
   KeySchemaElement
-  ;; (java->clojure [e] {:name (keyword (.getAttributeName e))
-  ;;                     :type (DynamoDB-enum-str->keyword (.getKeyType e))})
+  (java->clojure [e] {:name (keyword (.getAttributeName e))
+                      :type (DynamoDB-enum-str->keyword (.getKeyType e))})
   (clojure->java [e [n t]] (doto e
                              (.setAttributeName (name n))
                              (.setKeyType (keyword->DynamoDB-enum-str t))))
@@ -305,6 +303,8 @@
                                 (.setWriteCapacityUnits (long wu))))
 
   AttributeDefinition
+  (java->clojure [d] {:name (keyword (.getAttributeName d))
+                      :type (DynamoDB-enum-str->keyword (.getAttributeType d))})
   (clojure->java [ad [n t]] (doto ad
                               (.setAttributeName (name n))
                               (.setAttributeType (keyword->DynamoDB-enum-str t))))
