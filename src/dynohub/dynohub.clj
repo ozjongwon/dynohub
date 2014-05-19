@@ -390,6 +390,7 @@
         client (db-client client-opts)
         result (.createTable client
                   (doto-cond [_ (CreateTableRequest.)]
+                     true (.setTableName table-name)
                      true (.setKeySchema (make-DynamoDB-parts :key-schema-elements
                                                               hash-keydef range-keydef))
                      true (.setProvisionedThroughput (make-DynamoDB-parts :provisioned-throughput
