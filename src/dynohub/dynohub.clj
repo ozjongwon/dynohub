@@ -327,12 +327,8 @@
                                                 (.setProjection proj)
                                                 (.setProvisionedThroughput prov)))
 
-
-
-
-
-
-
+  DeleteTableResult
+  (java->clojure [r] (java->clojure (.getTableDescription r)))
 
   TableDescription
   (java->clojure [d]
@@ -406,3 +402,7 @@
           ;; (describe-table table-name)
           )
       (java->clojure result))))
+
+
+(defn delete-table [client-opts table]
+  (java->clojure (.deleteTable (db-client client-opts) (DeleteTableRequest. (name table)))))
