@@ -293,7 +293,7 @@
 
 ;;
 ;;FIXME:
-;;      DOTO make binary converter flexible
+;;      TODO make binary converter flexible
 ;;
 (extend-protocol Java<->Coljure
   nil (java->clojure [_] nil)
@@ -378,25 +378,25 @@
   (clojure->java [a v] (assert (not (empty? v)) (str "Invalid DynamoDB value: empty string or set: " v))
     (cond
      ;; s
-     (string? v) (doto a (.setS v))
+     (string? v) (.setS a v)
      ;; n
-     (dynamo-db-number? v) (doto a (.setN (str v)))
+     (dynamo-db-number? v) (.setN a (str v))
 
      (set? v) (cond
                ;; ss
-               (every? string? v) (doto a (.setSS (vec v)))
+               (every? string? v) (.setSS a (vec v))
                ;; ns
-               (every? dynamo-db-number? v) (doto a (.setNS (mapv str  v)))
+               (every? dynamo-db-number? v) (.setNS a (mapv str  v))
                ;; bs
                ;; FIXME: freeze
                ;;:else (doto (AttributeValue.) (.setBS (mapv nt-freeze v))))
-               :else (doto a (.setBS (mapv str v))))
+               :else (.setBS a (mapv str v)))
 ;;     (instance? AttributeValue v) v
 
      ;; b
      ;; FIXME: freeze
      ;;:else (doto (AttributeValue.) (.setB (nt-freeze v)))))
-     :else (doto a (.setB v))))
+     :else (.setB a v)))
   (java->clojure [av] (or (.getS av)
                           (some->> (.getN  av) str->dynamo-db-num)
                           (some->> (.getSS av) (into #{}))
