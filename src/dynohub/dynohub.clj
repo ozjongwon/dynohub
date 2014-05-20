@@ -234,10 +234,11 @@
       (keyword)))
 
 (defn- keyword->DynamoDB-enum-str [^clojure.lang.Keyword k]
-  (-> k
-      (name)
-      (str/replace "-" "_")
-      (str/upper-case)))
+  (when k
+    (-> k
+        (name)
+        (str/replace "-" "_")
+        (str/upper-case))))
 
 (defmacro inline-secondary-index-description-result [d & {:keys [throughput?]}]
   `(hash-map :name       (keyword (.getIndexName ~d))
@@ -561,6 +562,11 @@
 (defn delete-table [client-opts table]
   (java->clojure (.deleteTable (db-client client-opts) (DeleteTableRequest. (name table)))))
 
+(defmacro set-return-consumed-capacity-total [obj]
+  `(.setReturnConsumedCapacity ~obj ~(keyword->DynamoDB-enum-str :total)))
+
+(defonce cc-total (keyword->DynamoDB-enum-str :total))
+
 (defn get-item
   "Retrieves an item from a table by its primary key with options:
     prim-kvs     - {<hash-key> <val>} or {<hash-key> <val> <range-key> <val>}.
@@ -568,13 +574,13 @@
     :consistent? - Use strongly (rather than eventually) consistent reads?"
   [client-opts table prim-kvs & {:keys [attrs consistent? return-cc?]}]
   (java->clojure (.getItem (db-client client-opts)
-                           (doto-cond (GetItemRequest.)
-                                      true              (.setTableName (name table))
-                                      true              (.setKey (make-DynamoDB-parts :attribute-values prim-kvs))
-                                      consistent?       (.setConsistentRead consistent?)
-                                      attrs             (.setAttributesToGet (mapv name attrs))
-                                      return-cc?        (.setReturnConsumedCapacity
-                                                         (keyword->DynamoDB-enum-str :total))))))
+                           (doto-cond (GetItemRequest. (name table)
+                                                       (make-DynamoDB-parts :attribute-values prim-kvs)
+                                                       consistent?)
+                                      attrs            (.setAttributesToGet (mapv name attrs))
+                                      return-cc?       (set-return-consumed-capacity-total)))))
+
+
 
 (defn put-item
   "Adds an item (Clojure map) to a table with options:
@@ -587,12 +593,13 @@
                              :or   {return :none}}]
   (java->clojure
    (.putItem (db-client client-opts)
-     (doto-cond (PutItemRequest.)
-       true     (.setTableName    (name table))
-       true     (.setItem         (make-DynamoDB-parts :attribute-values item))
-       expected (.setExpected     (make-DynamoDB-parts :expected-attribute-values expected))
-       return   (.setReturnValues (keyword->DynamoDB-enum-str return))
-       return-cc? (.setReturnConsumedCapacity (keyword->DynamoDB-enum-str :total))))))
+             (doto-cond (PutItemRequest. (name table)
+                                         (make-DynamoDB-parts :attribute-values item)
+                                         (keyword->DynamoDB-enum-str return))
+                        expected (.setExpected     (make-DynamoDB-parts :expected-attribute-values expected))
+                        return-cc? (set-return-consumed-capacity-total)))))
+
+
 
 (defn update-item
   "Updates an item in a table by its primary key with options:
@@ -604,13 +611,12 @@
                                             :or   {return :none}}]
   (java->clojure
    (.updateItem (db-client client-opts)
-     (doto-cond (UpdateItemRequest.)
-       true  (.setTableName        (name table))
-       true  (.setKey              (make-DynamoDB-parts :attribute-values prim-kvs))
-       true  (.setAttributeUpdates (make-DynamoDB-parts :attribute-value-updates update-map))
+     (doto-cond (UpdateItemRequest. (name table)
+                                    (make-DynamoDB-parts :attribute-values prim-kvs)
+                                    (make-DynamoDB-parts :attribute-value-updates update-map)
+                                    (keyword->DynamoDB-enum-str return))
        expected (.setExpected      (make-DynamoDB-parts :expected-attribute-values expected))
-       return   (.setReturnValues  (keyword->DynamoDB-enum-str return))
-       return-cc? (.setReturnConsumedCapacity (keyword->DynamoDB-enum-str :total))))))
+       return-cc? (set-return-consumed-capacity-total)))))
 
 (defn delete-item
   "Deletes an item from a table by its primary key.
@@ -619,12 +625,11 @@
                                  :or   {return :none}}]
   (java->clojure
    (.deleteItem (db-client client-opts)
-     (doto-cond (DeleteItemRequest.)
-       true     (.setTableName    (name table))
-       true     (.setKey          (make-DynamoDB-parts :attribute-values prim-kvs))
-       expected (.setExpected     (make-DynamoDB-parts :expected-attribute-values expected))
-       return   (.setReturnValues (keyword->DynamoDB-enum-str return))
-       return-cc? (.setReturnConsumedCapacity (keyword->DynamoDB-enum-str :total))))))
+     (doto-cond (DeleteItemRequest. (name table)
+                                    (make-DynamoDB-parts :attribute-values prim-kvs)
+                                    (keyword->DynamoDB-enum-str return))
+                expected (.setExpected     (make-DynamoDB-parts :expected-attribute-values expected))
+                return-cc? (set-return-consumed-capacity-total)))))
 
 (defn- merge-more
   "Enables auto paging for batch batch-get/write and query/scan requests.
@@ -662,8 +667,6 @@
   (letfn [(run1 [raw-req]
             (java->clojure
              (.batchGetItem (db-client client-opts)
-               (doto-cond (BatchGetItemRequest.)
-                 true       (.setRequestItems raw-req)
-                 return-cc? (.setReturnConsumedCapacity (keyword->DynamoDB-enum-str :total))))))]
+                            (BatchGetItemRequest. raw-req cc-total))))]
     (when-not (empty? requests)
       (merge-more run1 span-reqs (run1 (make-DynamoDB-parts :keys-and-attributes requests))))))
