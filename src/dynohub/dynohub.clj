@@ -307,6 +307,14 @@
                                                   (clojure->java (AttributeValue.) v)))])
            expected))
 
+(defmethod make-DynamoDB-parts :attribute-value-updates [_ update-map]
+  (when-not (empty? update-map)
+    (maphash (fn [[k [action val]]]
+               (println k action val)
+               [(name k) (AttributeValueUpdate. (clojure->java (AttributeValue.) val)
+                                                (keyword->DynamoDB-enum-str action))])
+             update-map)))
+
 (defn- java->clojure-hashmap-with-cc-units-meta [result map]
   (with-meta (maphash (fn [[k v]]
                         [(keyword k) (java->clojure v)])
@@ -445,8 +453,12 @@
   PutItemResult
   (java->clojure [r] (java->clojure-hashmap-with-cc-units-meta r (.getAttributes r)))
 
+  UpdateItemResult
+  (java->clojure [r] (java->clojure-hashmap-with-cc-units-meta r (.getAttributes r)))
+
   DescribeTableResult
   (java->clojure [r] (java->clojure (.getTable r)))
+
   )
 
 ;;;
@@ -499,6 +511,13 @@
           )
       (java->clojure result))))
 
+(defn ensure-table "Creates a table iff it doesn't already exist."
+  [client-opts table-name hash-keydef & opts]
+  (when-not (describe-table client-opts table-name)
+    (create-table client-opts table-name hash-keydef opts)))
+
+;;(defn update-table
+
 
 (defn delete-table [client-opts table]
   (java->clojure (.deleteTable (db-client client-opts) (DeleteTableRequest. (name table)))))
@@ -525,8 +544,8 @@
                 met for the operation to succeed. e.g.:
                   {<attr> <expected-value> ...}
                   {<attr> false ...} ; Attribute must not exist"
-  [client-opts table item & [{:keys [return expected return-cc?]
-                              :or   {return :none}}]]
+  [client-opts table item & {:keys [return expected return-cc?]
+                             :or   {return :none}}]
   (java->clojure
    (.putItem (db-client client-opts)
      (doto-cond (PutItemRequest.)
@@ -534,4 +553,22 @@
        true     (.setItem         (make-DynamoDB-parts :attribute-values item))
        expected (.setExpected     (make-DynamoDB-parts :expected-attribute-values expected))
        return   (.setReturnValues (keyword->DynamoDB-enum-str return))
+       return-cc? (.setReturnConsumedCapacity (keyword->DynamoDB-enum-str :total))))))
+
+(defn update-item
+  "Updates an item in a table by its primary key with options:
+    prim-kvs   - {<hash-key> <val>} or {<hash-key> <val> <range-key> <val>}.
+    update-map - {<attr> [<#{:put :add :delete}> <optional value>]}.
+    :return    - e/o #{:none :all-old :updated-old :all-new :updated-new}.
+    :expected  - {<attr> <#{<expected-value> false}> ...}."
+  [client-opts table prim-kvs update-map & {:keys [return expected return-cc?]
+                                            :or   {return :none}}]
+  (java->clojure
+   (.updateItem (db-client client-opts)
+     (doto-cond (UpdateItemRequest.)
+       true  (.setTableName        (name table))
+       true  (.setKey              (make-DynamoDB-parts :attribute-values prim-kvs))
+       true  (.setAttributeUpdates (make-DynamoDB-parts :attribute-value-updates update-map))
+       expected (.setExpected      (make-DynamoDB-parts :expected-attribute-values expected))
+       return   (.setReturnValues  (keyword->DynamoDB-enum-str return))
        return-cc? (.setReturnConsumedCapacity (keyword->DynamoDB-enum-str :total))))))
