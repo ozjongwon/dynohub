@@ -456,6 +456,9 @@
   UpdateItemResult
   (java->clojure [r] (java->clojure-hashmap-with-cc-units-meta r (.getAttributes r)))
 
+  DeleteItemResult
+  (java->clojure [r] (java->clojure-hashmap-with-cc-units-meta r (.getAttributes r)))
+
   DescribeTableResult
   (java->clojure [r] (java->clojure (.getTable r)))
 
@@ -571,4 +574,18 @@
        true  (.setAttributeUpdates (make-DynamoDB-parts :attribute-value-updates update-map))
        expected (.setExpected      (make-DynamoDB-parts :expected-attribute-values expected))
        return   (.setReturnValues  (keyword->DynamoDB-enum-str return))
+       return-cc? (.setReturnConsumedCapacity (keyword->DynamoDB-enum-str :total))))))
+
+(defn delete-item
+  "Deletes an item from a table by its primary key.
+  See `put-item` for option docs."
+  [client-opts table prim-kvs & {:keys [return expected return-cc?]
+                                 :or   {return :none}}]
+  (java->clojure
+   (.deleteItem (db-client client-opts)
+     (doto-cond (DeleteItemRequest.)
+       true     (.setTableName    (name table))
+       true     (.setKey          (make-DynamoDB-parts :attribute-values prim-kvs))
+       expected (.setExpected     (make-DynamoDB-parts :expected-attribute-values expected))
+       return   (.setReturnValues (keyword->DynamoDB-enum-str return))
        return-cc? (.setReturnConsumedCapacity (keyword->DynamoDB-enum-str :total))))))
