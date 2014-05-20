@@ -452,26 +452,18 @@
                    ;; ns
                    (every? dynamo-db-number? v) (doto a (.setNS (mapv str  v)))
                    ;; bs
-                   ;; FIXME: freeze
                    :else (doto a (.setBS (mapv *binary-writer* v)))))
-               ;;:else (doto a (.setBS (mapv str v))))
      ;;     (instance? AttributeValue v) v
 
      ;; b
-     ;; FIXME: freeze
      :else (doto a (.setB (*binary-writer* v)))))
-     ;;:else (doto a (.setB v))))
 
   (java->clojure [av] (or (.getS av)
                           (some->> (.getN  av) str->dynamo-db-num)
                           (some->> (.getSS av) (into #{}))
                           (some->> (.getNS av) (mapv str->dynamo-db-num) (into #{}))
                           (some->> (.getBS av) (mapv *binary-reader*) (into #{}))
-                          ;; FIXME: nt-thaw
-                          ;;(some->> (.getBS av) (mapv str) (into #{}))
-                          ;; FIXME: nt-thaw
                           (some->> (.getB  av) *binary-reader*)) ; Last, may be falsey
-                          ;;(some->> (.getB  av) #(do "av"))) ; Last, may be falsey
       )
 
   ConsumedCapacity
