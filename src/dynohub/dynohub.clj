@@ -357,6 +357,11 @@
 
   java.util.ArrayList (java->clojure [a] (mapv java->clojure a))
 
+  java.util.HashMap   (java->clojure [m]
+                        (maphash (fn [[k v]]
+                                   [(keyword k) (java->clojure v)])
+                                 m))
+
   CreateTableResult
   (java->clojure [r] (java->clojure (.getTableDescription r)))
 
@@ -494,6 +499,12 @@
        attrs            (.setAttributesToGet (mapv name attrs))
        consistent?      (.setConsistentRead  consistent?)
        true             (.setKeys (make-DynamoDB-parts :key-attributes prim-kvs))))
+
+  BatchGetItemResult
+  (java->clojure [r]
+    {:items       (java->clojure (.getResponses r))
+     :unprocessed (.getUnprocessedKeys r)
+     :cc-units    (java->clojure (.getConsumedCapacity r))})
   )
 
 ;;;
@@ -621,6 +632,23 @@
        expected (.setExpected     (make-DynamoDB-parts :expected-attribute-values expected))
        return   (.setReturnValues (keyword->DynamoDB-enum-str return))
        return-cc? (.setReturnConsumedCapacity (keyword->DynamoDB-enum-str :total))))))
+
+(defn- merge-more
+  "Enables auto paging for batch batch-get/write and query/scan requests.
+  Particularly useful for throughput limitations."
+  [more-f {max-reqs :max :keys [throttle-ms]} last-result]
+  (loop [{:keys [unprocessed last-prim-kvs] :as last-result} last-result idx 1]
+    (let [more (or unprocessed last-prim-kvs)]
+      (if (or (empty? more) (nil? max-reqs) (>= idx max-reqs))
+        (if-let [items (:items last-result)]
+          (with-meta items (dissoc last-result :items))
+          last-result)
+        (let [merge-results (fn [l r] (cond (number? l) (+    l r)
+                                           (vector? l) (into l r)
+                                           :else               r))]
+          (when throttle-ms (Thread/sleep throttle-ms))
+          (recur (merge-with merge-results last-result (more-f more))
+                 (inc idx)))))))
 
 (defn batch-get-item
   "Retrieves a batch of items in a single request.
