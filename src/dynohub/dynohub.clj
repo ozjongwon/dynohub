@@ -158,6 +158,14 @@
         (assert (vector? args#))
         (mapv #(clojure->java ~sexp %) args#))))
 
+
+(defn- cartesian-product [& seqs]
+  ;; From Pascal Costanza's CL code
+  (letfn [(simple-cartesian-product [s1 s2]
+            (for [x s1 y s2]
+              (conj x y)))]
+    (reduce simple-cartesian-product [[]] seqs)))
+
 ;;;;;;;;;;;;;;;;;;;;;
 (def ^:private db-client*
   "Returns a new AmazonDynamoDBClient instance for the supplied client opts:
@@ -310,10 +318,27 @@
 (defmethod make-DynamoDB-parts :attribute-value-updates [_ update-map]
   (when-not (empty? update-map)
     (maphash (fn [[k [action val]]]
-               (println k action val)
                [(name k) (AttributeValueUpdate. (clojure->java (AttributeValue.) val)
                                                 (keyword->DynamoDB-enum-str action))])
              update-map)))
+
+(defmethod make-DynamoDB-parts :keys-and-attributes [_ requests]
+  (maphash (fn [[k v]]
+             [(name k) (clojure->java (KeysAndAttributes.) v)])
+           requests))
+
+(defmethod make-DynamoDB-parts :key-attributes [_ prim-kvs]
+  (letfn [(map->cartesian-product [m]
+            (apply cartesian-product
+                   (mapv (fn [[k v]]
+                           (if (vector? v)
+                             (cartesian-product [k] v)
+                             (list [k v])))
+                         m)))]
+    (->> (if (map? prim-kvs) [prim-kvs] prim-kvs)
+         (mapcat map->cartesian-product)
+         (mapv #(into {} %))
+         (mapv #(make-DynamoDB-parts :attribute-values %)))))
 
 (defn- java->clojure-hashmap-with-cc-units-meta [result map]
   (with-meta (maphash (fn [[k v]]
@@ -462,6 +487,13 @@
   DescribeTableResult
   (java->clojure [r] (java->clojure (.getTable r)))
 
+
+  KeysAndAttributes
+  (clojure->java [ka {:keys [prim-kvs attrs consistent?]}]
+    (doto-cond (KeysAndAttributes.)
+       attrs            (.setAttributesToGet (mapv name attrs))
+       consistent?      (.setConsistentRead  consistent?)
+       true             (.setKeys (make-DynamoDB-parts :key-attributes prim-kvs))))
   )
 
 ;;;
@@ -589,3 +621,28 @@
        expected (.setExpected     (make-DynamoDB-parts :expected-attribute-values expected))
        return   (.setReturnValues (keyword->DynamoDB-enum-str return))
        return-cc? (.setReturnConsumedCapacity (keyword->DynamoDB-enum-str :total))))))
+
+(defn batch-get-item
+  "Retrieves a batch of items in a single request.
+  Limits apply, Ref. http://goo.gl/Bj9TC.
+
+  (batch-get-item client-opts
+    {:users   {:prim-kvs {:name \"alice\"}}
+     :posts   {:prim-kvs {:id [1 2 3]}
+               :attrs    [:timestamp :subject]
+               :consistent? true}
+     :friends {:prim-kvs [{:catagory \"favorites\" :id [1 2 3]}
+                          {:catagory \"recent\"    :id [7 8 9]}]}})
+
+  :span-reqs - {:max _ :throttle-ms _} allows a number of requests to
+  automatically be stitched together (to exceed throughput limits, for example)."
+  [client-opts requests & {:keys [return-cc? span-reqs] :as opts
+                           :or   {span-reqs {:max 5}}}]
+  (letfn [(run1 [raw-req]
+            (java->clojure
+             (.batchGetItem (db-client client-opts)
+               (doto-cond (BatchGetItemRequest.)
+                 true       (.setRequestItems raw-req)
+                 return-cc? (.setReturnConsumedCapacity (keyword->DynamoDB-enum-str :total))))))]
+    (when-not (empty? requests)
+      (merge-more run1 span-reqs (run1 (make-DynamoDB-parts :keys-and-attributes requests))))))
