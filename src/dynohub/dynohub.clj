@@ -445,11 +445,25 @@
   PutItemResult
   (java->clojure [r] (java->clojure-hashmap-with-cc-units-meta r (.getAttributes r)))
 
+  DescribeTableResult
+  (java->clojure [r] (java->clojure (.getTable r)))
   )
 
 ;;;
 ;;; Public API
 ;;;
+
+(defn list-tables "Returns a vector of table names."
+  [client-opts]
+  (->> (db-client client-opts) (.listTables) (.getTableNames) (mapv keyword)))
+
+(defn describe-table
+  "Returns a map describing a table, or nil if the table doesn't exist."
+  [client-opts table]
+  (try (java->clojure (.describeTable (db-client client-opts)
+                                      (doto (DescribeTableRequest.) (.setTableName (name table)))))
+       (catch ResourceNotFoundException _ nil)))
+
 (defn create-table
   "Creates a table with options:
     hash-keydef   - [<name> <#{:s :n :ss :ns :b :bs}>].
