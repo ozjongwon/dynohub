@@ -340,11 +340,12 @@
          (mapv #(into {} %))
          (mapv #(make-DynamoDB-parts :attribute-values %)))))
 
-(defn- java->clojure-hashmap-with-cc-units-meta [result map]
-  (with-meta (maphash (fn [[k v]]
-                        [(keyword k) (java->clojure v)])
-                      map)
-    {:cc-units (java->clojure (.getConsumedCapacity result))}))
+(defn- java-result->clojure-with-cc-units-meta [result map]
+  (when map
+    (with-meta (maphash (fn [[k v]]
+                          [(keyword k) (java->clojure v)])
+                        map)
+      {:cc-units (java->clojure (.getConsumedCapacity result))})))
 
 ;;
 ;;FIXME:
@@ -470,16 +471,16 @@
   (java->clojure [cc] (some-> cc (.getCapacityUnits)))
 
   GetItemResult
-  (java->clojure [r] (java->clojure-hashmap-with-cc-units-meta r (.getItem r)))
+  (java->clojure [r] (java-result->clojure-with-cc-units-meta r (.getItem r)))
 
   PutItemResult
-  (java->clojure [r] (java->clojure-hashmap-with-cc-units-meta r (.getAttributes r)))
+  (java->clojure [r] (java-result->clojure-with-cc-units-meta r (.getAttributes r)))
 
   UpdateItemResult
-  (java->clojure [r] (java->clojure-hashmap-with-cc-units-meta r (.getAttributes r)))
+  (java->clojure [r] (java-result->clojure-with-cc-units-meta r (.getAttributes r)))
 
   DeleteItemResult
-  (java->clojure [r] (java->clojure-hashmap-with-cc-units-meta r (.getAttributes r)))
+  (java->clojure [r] (java-result->clojure-with-cc-units-meta r (.getAttributes r)))
 
   DescribeTableResult
   (java->clojure [r] (java->clojure (.getTable r)))
