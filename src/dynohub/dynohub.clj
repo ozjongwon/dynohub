@@ -3,7 +3,8 @@
   Ref. https://github.com/ptaoussanis/faraday (Faraday),
        http://goo.gl/22QGA (DynamoDBv2 API)"
   {:author "Jong-won Choi"}
-  (:require [clojure.string         :as str]
+  (:require [clojure.string     :as str]
+            [clojure.edn        :as edn]
             ;; [taoensso.encore        :as encore :refer (doto-cond)]
             ;; [taoensso.nippy.tools   :as nippy-tools]
             ;; [taoensso.faraday.utils :as utils :refer (coll?*)]
@@ -118,14 +119,6 @@
 (defn error [s & more]
   (throw (Exception. (apply str more))))
 
-(defn parse-number [^String s]
-  ;; This assumes the given s is a well formed passive number string
-  ;; so no need   (binding [*read-eval* false]
-  (let [n (read-string s)]
-    (if (number? n)
-      n
-      (throw (Exception. (str "Invalid number type value " s "from DynamoDB!"))))))
-
 (def mapset (comp set mapv))
 (def maphash (comp (partial apply hash-map) mapcat))
 
@@ -139,12 +132,10 @@
              (<= (get-bignum-precision x) 38)))))
 
 (defn- str->dynamo-db-num [^String s]
-  ;; This assumes the given s is a well formed passive number string
-  ;; so no need   (binding [*read-eval* false]
-  (let [n (read-string s)]
+  (let [n (edn/read-string s)]
     (if (number? n)
       n
-      (throw (Exception. (str "Invalid number type value " s "from DynamoDB!"))))))
+      (throw (Exception. (str "Invalid number type value " s " from DynamoDB!"))))))
 
 (defmacro doto-cond "My own version of doto-cond"
   [exp & clauses]
@@ -205,14 +196,14 @@
 ;;; Simple binary reader/writer
 ;;;
 (defn- sexp->str [sexp]
-  (binding [*print-dup* true]
-    (print-str sexp)))
+  (-> (pr-str sexp)
+      (.getBytes)
+      (ByteBuffer/wrap)))
 
 (defn- byte-buffer->sexp [^ByteBuffer buf]
-  (binding [*read-eval* false]
-    (-> (.array buf)
-        (String.)
-        (read-string))))
+  (-> (.array buf)
+      (String.)
+      (edn/read-string)))
 
 (def ^:dynamic *binary-writer* sexp->str)
 (def ^:dynamic *binary-reader* byte-buffer->sexp)
@@ -309,12 +300,27 @@
              [(name k) (clojure->java (AttributeValue.) v)])
            prim-kvs))
 
+(defmethod make-DynamoDB-parts :expected-attribute-values [_ expected]
+  (maphash (fn [[k v]]
+             [(name k) (ExpectedAttributeValue. (if (= v false)
+                                                  false
+                                                  (clojure->java (AttributeValue.) v)))])
+           expected))
+
+(defn- java->clojure-hashmap-with-cc-units-meta [result map]
+  (with-meta (maphash (fn [[k v]]
+                        [(keyword k) (java->clojure v)])
+                      map)
+    {:cc-units (java->clojure (.getConsumedCapacity result))}))
+
 ;;
 ;;FIXME:
 ;;      TODO make binary converter flexible
 ;;
 (extend-protocol Java<->Coljure
   nil (java->clojure [_] nil)
+
+;;  java.lang.Boolean (java->clojure [v] v)
 
   java.util.ArrayList (java->clojure [a] (mapv java->clojure a))
 
@@ -393,27 +399,29 @@
   (java->clojure [d] (inline-secondary-index-description-result d :throughput? true))
 
   AttributeValue
-  (clojure->java [a v] (assert (not (empty? v)) (str "Invalid DynamoDB value: empty string or set: " v))
+  (clojure->java [a v]
     (cond
      ;; s
-     (string? v) (doto a (.setS v))
+     (string? v) (do (assert (not (empty? v)) (str "Invalid DynamoDB value: empty string: " v))
+                     (doto a (.setS v)))
      ;; n
      (dynamo-db-number? v) (doto a (.setN (str v)))
 
-     (set? v) (cond
-               ;; ss
-               (every? string? v) (doto a (.setSS (vec v)))
-               ;; ns
-               (every? dynamo-db-number? v) (doto a (.setNS (mapv str  v)))
-               ;; bs
-               ;; FIXME: freeze
-               :else (doto (AttributeValue.) (.setBS (mapv *binary-writer* v))))
+     (set? v) (do (assert (not (empty? v)) (str "Invalid DynamoDB value: empty set: " v))
+                  (cond
+                   ;; ss
+                   (every? string? v) (doto a (.setSS (vec v)))
+                   ;; ns
+                   (every? dynamo-db-number? v) (doto a (.setNS (mapv str  v)))
+                   ;; bs
+                   ;; FIXME: freeze
+                   :else (doto a (.setBS (mapv *binary-writer* v)))))
                ;;:else (doto a (.setBS (mapv str v))))
      ;;     (instance? AttributeValue v) v
 
      ;; b
      ;; FIXME: freeze
-     :else (doto (AttributeValue.) (.setB (*binary-writer* v)))))
+     :else (doto a (.setB (*binary-writer* v)))))
      ;;:else (doto a (.setB v))))
 
   (java->clojure [av] (or (.getS av)
@@ -432,10 +440,10 @@
   (java->clojure [cc] (some-> cc (.getCapacityUnits)))
 
   GetItemResult
-  (java->clojure [r] (with-meta (maphash (fn [[k v]]
-                                           [(keyword k) (java->clojure v)])
-                                         (.getItem r))
-                       {:cc-units (java->clojure (.getConsumedCapacity r))}))
+  (java->clojure [r] (java->clojure-hashmap-with-cc-units-meta r (.getItem r)))
+
+  PutItemResult
+  (java->clojure [r] (java->clojure-hashmap-with-cc-units-meta r (.getAttributes r)))
 
   )
 
@@ -495,3 +503,21 @@
                                       attrs             (.setAttributesToGet (mapv name attrs))
                                       return-cc?        (.setReturnConsumedCapacity
                                                          (keyword->DynamoDB-enum-str :total))))))
+
+(defn put-item
+  "Adds an item (Clojure map) to a table with options:
+    :return   - e/o #{:none :all-old :updated-old :all-new :updated-new}.
+    :expected - A map of item attribute/condition pairs, all of which must be
+                met for the operation to succeed. e.g.:
+                  {<attr> <expected-value> ...}
+                  {<attr> false ...} ; Attribute must not exist"
+  [client-opts table item & [{:keys [return expected return-cc?]
+                              :or   {return :none}}]]
+  (java->clojure
+   (.putItem (db-client client-opts)
+     (doto-cond (PutItemRequest.)
+       true     (.setTableName    (name table))
+       true     (.setItem         (make-DynamoDB-parts :attribute-values item))
+       expected (.setExpected     (make-DynamoDB-parts :expected-attribute-values expected))
+       return   (.setReturnValues (keyword->DynamoDB-enum-str return))
+       return-cc? (.setReturnConsumedCapacity (keyword->DynamoDB-enum-str :total))))))
