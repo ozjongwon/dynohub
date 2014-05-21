@@ -4,11 +4,7 @@
        http://goo.gl/22QGA (DynamoDBv2 API)"
   {:author "Jong-won Choi"}
   (:require [clojure.string     :as str]
-            [clojure.edn        :as edn]
-            ;; [taoensso.encore        :as encore :refer (doto-cond)]
-            ;; [taoensso.nippy.tools   :as nippy-tools]
-            ;; [taoensso.faraday.utils :as utils :refer (coll?*)]
-            )
+            [clojure.edn        :as edn])
   (:import  [clojure.lang BigInt]
             [java.util Collections]
             [java.lang Math]
@@ -219,9 +215,14 @@
 (def ^:dynamic *binary-writer* sexp->str)
 (def ^:dynamic *binary-reader* byte-buffer->sexp)
 
-(defmacro with-binary-reader-writer [[& {:keys [writer reader] :or {reader '*binary-reader* writer '*binary-writer*}}]
+(defmacro with-binary-reader-writer [[& {:keys [writer reader]
+                                         :or {reader '*binary-reader* writer '*binary-writer*}}]
                                      & body]
   `(binding [*binary-writer* ~writer *binary-reader* ~reader]
+     ~@body))
+
+(defmacro without-binary-reader-writer [[] & body]
+  `(binding [*binary-writer* identity *binary-reader* identity]
      ~@body))
 
 ;;;
@@ -383,10 +384,9 @@
                  `[:scanned-count (.getScannedCount ~r)])
              ))
 
-;;
-;;FIXME:
-;;      TODO make binary converter flexible
-;;
+;;;
+;;; Implementation of java->clojure and clojure->java
+;;;
 (extend-protocol Java<->Coljure
   nil (java->clojure [_] nil)
 
@@ -482,6 +482,7 @@
      ;; n
      (dynamo-db-number? v) (doto a (.setN (str v)))
 
+     ;; set
      (set? v) (do (assert (not (empty? v)) (str "Invalid DynamoDB value: empty set: " v))
                   (cond
                    ;; ss
@@ -490,7 +491,6 @@
                    (every? dynamo-db-number? v) (doto a (.setNS (mapv str  v)))
                    ;; bs
                    :else (doto a (.setBS (mapv *binary-writer* v)))))
-     ;;     (instance? AttributeValue v) v
 
      ;; b
      :else (doto a (.setB (*binary-writer* v)))))
@@ -894,4 +894,18 @@
               }
              :site
              {:owner-email "email" :name "name"}))
+
+
+(without-binary-reader-writer [:reader nt-thaw :writer nt-freeze]
+  (put-item {:access-key "accesskey" :secret-key "secretkey"
+             :endpoint "http://localhost:8000"    ; For DynamoDB Local
+             } :site {:active? false, :name "name", :true false, :locale :en_AU, :k 1, :owner-email "email" :time (t/now) :l33 '(1 2 3)}))
+
+(without-binary-reader-writer [:reader nt-thaw :writer nt-freeze]
+  (get-item {:access-key "accesskey" :secret-key "secretkey"
+              :endpoint "http://localhost:8000"    ; For DynamoDB Local
+              }
+             :site
+             {:owner-email "email" :name "name"}))
+
 )
