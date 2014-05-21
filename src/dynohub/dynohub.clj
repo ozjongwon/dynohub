@@ -510,7 +510,7 @@
 
   KeysAndAttributes
   (clojure->java [ka {:keys [prim-kvs attrs consistent?]}]
-    (doto-cond (KeysAndAttributes.)
+    (doto-cond ka
        attrs            (.setAttributesToGet (mapv name attrs))
        consistent?      (.setConsistentRead  consistent?)
        true             (.setKeys (make-DynamoDB-parts :key-attributes prim-kvs))))
@@ -555,7 +555,7 @@
   "Returns a map describing a table, or nil if the table doesn't exist."
   [client-opts table]
   (try (java->clojure (.describeTable (db-client client-opts)
-                                      (doto (DescribeTableRequest.) (.setTableName (name table)))))
+                                      (DescribeTableRequest. (name table))))
        (catch ResourceNotFoundException _ nil)))
 
 (defn create-table
@@ -575,14 +575,13 @@
   (let [table-name (name table-name)
         client (db-client client-opts)
         result (.createTable client
-                  (doto-cond (CreateTableRequest.)
-                     true (.setTableName table-name)
-                     true (.setKeySchema (make-DynamoDB-parts :key-schema-elements
-                                                              hash-keydef range-keydef))
-                     true (.setProvisionedThroughput (make-DynamoDB-parts :provisioned-throughput
+                  (doto-cond (CreateTableRequest. (make-DynamoDB-parts :attribute-definitions
+                                                                       hash-keydef range-keydef lsindexes gsindexes)
+                                                  table-name
+                                                  (make-DynamoDB-parts :key-schema-elements
+                                                                       hash-keydef range-keydef)
+                                                  (make-DynamoDB-parts :provisioned-throughput
                                                                           throughput))
-                     true (.setAttributeDefinitions (make-DynamoDB-parts :attribute-definitions
-                                                                         hash-keydef range-keydef lsindexes gsindexes))
                      lsindexes (.setLocalSecondaryIndexes (make-DynamoDB-parts :local-secondary-indexes)
                                                           hash-keydef lsindexes)
                      gsindexes (.setGlobalSecondaryIndexes (make-DynamoDB-parts :global-secondary-indexes
@@ -715,6 +714,37 @@
                             (BatchGetItemRequest. raw-req cc-total))))]
     (when-not (empty? requests)
       (merge-more run1 span-reqs (run1 (make-DynamoDB-parts :keys-and-attributes requests))))))
+
+#_
+(defn batch-write-item
+  "Executes a batch of Puts and/or Deletes in a single request.
+   Limits apply, Ref. http://goo.gl/Bj9TC. No transaction guarantees are
+   provided, nor conditional puts. Request execution order is undefined.
+
+   (batch-write-item client-opts
+     {:users {:put    [{:user-id 1 :username \"sally\"}
+                       {:user-id 2 :username \"jane\"}]
+              :delete [{:user-id [3 4 5]}]}})
+
+  :span-reqs - {:max _ :throttle-ms _} allows a number of requests to
+  automatically be stitched together (to exceed throughput limits, for example)."
+  [client-opts requests & {:keys [return-cc? span-reqs] :as opts
+                           :or   {span-reqs {:max 5}}}]
+  (letfn [(run1 [raw-req]
+            (java->clojure
+             (.batchWriteItem (db-client client-opts)
+               (doto-cond (BatchWriteItemRequest. raw-req)
+                 return-cc? (set-return-consumed-capacity-total)))))]
+    (merge-more run1 span-reqs
+      (run1
+       (utils/name-map
+        ;; {<table> <table-reqs> ...} -> {<table> [WriteRequest ...] ...}
+        (fn [table-request]
+          (reduce into []
+            (for [action (keys table-request)
+                  :let [items (attr-multi-vs (table-request action))]]
+              (mapv (partial write-request action) items))))
+        requests)))))
 
 (defn query
   "Retrieves items from a table (indexed) with options:
