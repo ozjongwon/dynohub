@@ -635,15 +635,18 @@
   "Enables auto paging for batch batch-get/write and query/scan requests.
   Particularly useful for throughput limitations."
   [more-f {max-reqs :max :keys [throttle-ms]} last-result]
-  (loop [{:keys [unprocessed last-prim-kvs] :as last-result} last-result idx 1]
+  ;;{:items {...}, :unprocessed {...}, :cc-units nil}
+  (loop [{:keys [items unprocessed last-prim-kvs] :as last-result} last-result idx 1]
     (let [more (or unprocessed last-prim-kvs)]
       (if (or (empty? more) (nil? max-reqs) (>= idx max-reqs))
-        (if-let [items (:items last-result)]
+        (if items
           (with-meta items (dissoc last-result :items))
           last-result)
+        ;;{:items {:a {:b 2}}  :n1 2 :v1  [1 2]}
+        ;;{:items {:a {:b1 2}} :n1 3 :v1  [1 2]}
         (let [merge-results (fn [l r] (cond (number? l) (+    l r)
-                                           (vector? l) (into l r)
-                                           :else               r))]
+                                            (vector? l) (into l r)
+                                            :else               r))]
           (when throttle-ms (Thread/sleep throttle-ms))
           (recur (merge-with merge-results last-result (more-f more))
                  (inc idx)))))))
@@ -670,3 +673,17 @@
                             (BatchGetItemRequest. raw-req cc-total))))]
     (when-not (empty? requests)
       (merge-more run1 span-reqs (run1 (make-DynamoDB-parts :keys-and-attributes requests))))))
+
+
+;;; Some quick tests
+#_
+(dotimes [i 100]
+  (put-item {:access-key "accesskey" :secret-key "secretkey"
+             :endpoint "http://localhost:8000" ; For DynamoDB Local
+             } :site {:active? false, :name (str "name" i), :true false, :locale :en_AU, :k 1, :owner-email "email"}  :return nil))
+
+#_
+(batch-get-item {:access-key "accesskey" :secret-key "secretkey"
+                 :endpoint "http://localhost:8000" ; For DynamoDB Local
+                 }
+	        {:site {:prim-kvs {:name `["name" ~@(map #(str "name" %) (take 3 (range)))]:owner-email "email"}} :customer {:prim-kvs {:email "email"}}})
