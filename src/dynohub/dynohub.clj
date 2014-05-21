@@ -353,6 +353,15 @@
                [(name k) (clojure->java (Condition.) v)])
              conds)))
 
+(defmethod make-DynamoDB-parts :write-requests [_ table-req]
+  (letfn [(write-req [op m]
+            (let [attr-map (make-DynamoDB-parts :attribute-values m)]
+              (WriteRequest. (case op
+                               :put        (PutRequest. attr-map)
+                               :delete     (DeleteRequest. attr-map)))))]
+    (reduce into [] (for [[op attr-maps] table-req]
+                      (map #(write-req op %) attr-maps)))))
+
 (defn- java-result->clojure-with-cc-units-meta [result map]
   (when map
     (with-meta (maphash (fn [[k v]]
@@ -541,6 +550,11 @@
   ScanResult
   (java->clojure [r]
     (query-or-scan-result :scan r))
+
+  BatchWriteItemResult
+  (java->clojure [r]
+    {:unprocessed (.getUnprocessedItems r)
+     :cc-units    (java->clojure (.getConsumedCapacity r))})
   )
 
 ;;;
@@ -715,7 +729,6 @@
     (when-not (empty? requests)
       (merge-more run1 span-reqs (run1 (make-DynamoDB-parts :keys-and-attributes requests))))))
 
-#_
 (defn batch-write-item
   "Executes a batch of Puts and/or Deletes in a single request.
    Limits apply, Ref. http://goo.gl/Bj9TC. No transaction guarantees are
@@ -737,14 +750,9 @@
                  return-cc? (set-return-consumed-capacity-total)))))]
     (merge-more run1 span-reqs
       (run1
-       (utils/name-map
-        ;; {<table> <table-reqs> ...} -> {<table> [WriteRequest ...] ...}
-        (fn [table-request]
-          (reduce into []
-            (for [action (keys table-request)
-                  :let [items (attr-multi-vs (table-request action))]]
-              (mapv (partial write-request action) items))))
-        requests)))))
+       (maphash (fn [[table-name table-req]]
+                  [(name table-name) (make-DynamoDB-parts :write-requests table-req)])
+                requests)))))
 
 (defn query
   "Retrieves items from a table (indexed) with options:
