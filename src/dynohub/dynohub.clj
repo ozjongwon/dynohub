@@ -219,6 +219,11 @@
 (def ^:dynamic *binary-writer* sexp->str)
 (def ^:dynamic *binary-reader* byte-buffer->sexp)
 
+(defmacro with-binary-reader-writer [[& {:keys [writer reader] :or {reader '*binary-reader* writer '*binary-writer*}}]
+                                     & body]
+  `(binding [*binary-writer* ~writer *binary-reader* ~reader]
+     ~@body))
+
 ;;;
 ;;; DynamoDB interface
 ;;;
@@ -861,15 +866,32 @@
     (->> (mapv (fn [seg] (future (scan client-opts table (assoc opts :segment seg))))
                (range total-segments))
          (mapv deref))))
-;;; Some quick tests
-#_
+
+(comment
+  ;;; Some quick tests
 (dotimes [i 100]
   (put-item {:access-key "accesskey" :secret-key "secretkey"
              :endpoint "http://localhost:8000" ; For DynamoDB Local
              } :site {:active? false, :name (str "name" i), :true false, :locale :en_AU, :k 1, :owner-email "email"}  :return nil))
 
-#_
+
 (batch-get-item {:access-key "accesskey" :secret-key "secretkey"
                  :endpoint "http://localhost:8000" ; For DynamoDB Local
                  }
 	        {:site {:prim-kvs {:name `["name" ~@(map #(str "name" %) (take 3 (range)))]:owner-email "email"}} :customer {:prim-kvs {:email "email"}}})
+
+
+(def ^:private nt-freeze (comp #(ByteBuffer/wrap %) nippy-tools/freeze))
+(def ^:private nt-thaw   (comp nippy-tools/thaw #(.array ^ByteBuffer %)))
+(with-binary-reader-writer [:reader nt-thaw :writer nt-freeze]
+  (put-item {:access-key "accesskey" :secret-key "secretkey"
+             :endpoint "http://localhost:8000"    ; For DynamoDB Local
+             } :site {:active? false, :name "name", :true false, :locale :en_AU, :k 1, :owner-email "email" :time (t/now) :l33 '(1 2 3)}))
+
+(with-binary-reader-writer [:reader nt-thaw :writer nt-freeze]
+  (get-item {:access-key "accesskey" :secret-key "secretkey"
+              :endpoint "http://localhost:8000"    ; For DynamoDB Local
+              }
+             :site
+             {:owner-email "email" :name "name"}))
+)
