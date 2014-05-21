@@ -142,7 +142,7 @@
   (assert (even? (count clauses)))
   (let [g (gensym)
         sexps (map (fn [[cond sexp]]
-                     (if (symbol? cond)
+                     (if (or (symbol? cond) (list? cond))
                        `(when ~cond
                           (~(first sexp) ~g ~@(rest sexp)))
                        `(~(first sexp) ~g ~@(rest sexp))))
@@ -165,6 +165,9 @@
             (for [x s1 y s2]
               (conj x y)))]
     (reduce simple-cartesian-product [[]] seqs)))
+
+(defn- ensure-vector [e]
+  (if (vector? e) e [e]))
 
 ;;;;;;;;;;;;;;;;;;;;;
 (def ^:private db-client*
@@ -227,6 +230,7 @@
 ;; "CREATING" "UPDATING" "DELETING" "ACTIVE"
 ;; "HASH" "RANGE"
 ;; "KEYS_ONLY" "INCLUDE" "ALL"
+;;
 (defn- DynamoDB-enum-str->keyword [^String s]
   (-> s
       (str/replace "_" "-")
@@ -235,10 +239,11 @@
 
 (defn- keyword->DynamoDB-enum-str [^clojure.lang.Keyword k]
   (when k
-    (-> k
-        (name)
-        (str/replace "-" "_")
-        (str/upper-case))))
+    (or (k {:> "GT" :>= "GE" :< "LT" :<= "LE" := "EQ"})
+        (-> k
+            (name)
+            (str/replace "-" "_")
+            (str/upper-case)))))
 
 (defmacro inline-secondary-index-description-result [d & {:keys [throughput?]}]
   `(hash-map :name       (keyword (.getIndexName ~d))
@@ -340,6 +345,13 @@
          (mapcat map->cartesian-product)
          (mapv #(into {} %))
          (mapv #(make-DynamoDB-parts :attribute-values %)))))
+
+(defmethod make-DynamoDB-parts :conditions [_ conds]
+  (when-not (empty? conds)
+    (maphash (fn [[k v]]
+               (assert (vector v) (str "Malformed condition: " v))
+               [(name k) (clojure->java (Condition.) v)])
+             conds)))
 
 (defn- java-result->clojure-with-cc-units-meta [result map]
   (when map
@@ -499,6 +511,19 @@
     {:items       (java->clojure (.getResponses r))
      :unprocessed (.getUnprocessedKeys r)
      :cc-units    (java->clojure (.getConsumedCapacity r))})
+
+  Condition
+  (clojure->java [c [op v]]
+    (doto c
+      (.setComparisonOperator (keyword->DynamoDB-enum-str op))
+      (.setAttributeValueList (mapv #(AttributeValue. %) (ensure-vector v)))))
+
+  QueryResult
+  (java->clojure [r]
+    (merge {:items (mapv java->clojure (.getItems r))
+             :count (.getCount r)
+             :cc-units (java->clojure (.getConsumedCapacity r))
+             :last-prim-kvs (java->clojure (.getLastEvaluatedKey r))}))
   )
 
 ;;;
@@ -674,7 +699,115 @@
     (when-not (empty? requests)
       (merge-more run1 span-reqs (run1 (make-DynamoDB-parts :keys-and-attributes requests))))))
 
+(defn query
+  "Retrieves items from a table (indexed) with options:
+    prim-key-conds - {<key-attr> [<comparison-operator> <val-or-vals>] ...}.
+    :last-prim-kvs - Primary key-val from which to eval, useful for paging.
+    :query-filter  - {<key-attr> [<comparison-operator> <val-or-vals>] ...}.
+    :span-reqs     - {:max _ :throttle-ms _} controls automatic multi-request
+                     stitching.
+    :return        - e/o #{:all-attributes :all-projected-attributes :count
+                           [<attr> ...]}.
+    :index         - Name of a local or global secondary index to query.
+    :order         - Index scaning order e/o #{:asc :desc}.
+    :limit         - Max num >=1 of items to eval (≠ num of matching items).
+                     Useful to prevent harmful sudden bursts of read activity.
+    :consistent?   - Use strongly (rather than eventually) consistent reads?
 
+  (create-table client-opts :my-table [:name :s]
+    {:range-keydef [:age :n] :block? true})
+
+  (do (put-item client-opts :my-table {:name \"Steve\" :age 24})
+      (put-item client-opts :my-table {:name \"Susan\" :age 27}))
+  (query client-opts :my-table {:name [:eq \"Steve\"]
+                                :age  [:between [10 30]]})
+  => [{:age 24, :name \"Steve\"}]
+
+  comparison-operators e/o #{:eq :le :lt :ge :gt :begins-with :between}.
+
+  For unindexed item retrievel see `scan`.
+
+  Ref. http://goo.gl/XfGKW for query+scan best practices."
+  [client-opts table prim-key-conds
+   & {:keys [last-prim-kvs query-filter span-reqs return index order limit consistent?
+             return-cc?] :as opts
+      :or   {span-reqs {:max 5}
+             order     :asc}}]
+  (letfn [(run1 [last-prim-kvs]
+            (java->clojure
+             (.query (db-client client-opts)
+               (doto-cond (QueryRequest. (name table))
+                 true (.setKeyConditions    (make-DynamoDB-parts :conditions prim-key-conds))
+                 true (.setScanIndexForward (case order :asc true :desc false))
+                 last-prim-kvs   (.setExclusiveStartKey (make-DynamoDB-parts :attribute-values last-prim-kvs))
+                 query-filter    (.setQueryFilter (make-DynamoDB-parts :conditions query-filter))
+                 limit           (.setLimit     (int limit))
+                 index           (.setIndexName      index)
+                 consistent?     (.setConsistentRead consistent?)
+                 (vector? return) (.setAttributesToGet (mapv name return))
+                 (keyword? return) (.setSelect (keyword->DynamoDB-enum-str return))
+                 return-cc?      (set-return-consumed-capacity-total)))))]
+    (merge-more run1 span-reqs (run1 last-prim-kvs))))
+#_
+(defn scan
+  "Retrieves items from a table (unindexed) with options:
+    :attr-conds     - {<attr> [<comparison-operator> <val-or-vals>] ...}.
+    :limit          - Max num >=1 of items to eval (≠ num of matching items).
+                      Useful to prevent harmful sudden bursts of read activity.
+    :last-prim-kvs  - Primary key-val from which to eval, useful for paging.
+    :span-reqs      - {:max _ :throttle-ms _} controls automatic multi-request
+                      stitching.
+    :return         - e/o #{:all-attributes :all-projected-attributes :count
+                            [<attr> ...]}.
+    :total-segments - Total number of parallel scan segments.
+    :segment        - Calling worker's segment number (>=0, <=total-segments).
+
+  comparison-operators e/o #{:eq :le :lt :ge :gt :begins-with :between :ne
+                             :not-null :null :contains :not-contains :in}.
+
+  (create-table client-opts :my-table [:name :s]
+    {:range-keydef [:age :n] :block? true})
+
+  (do (put-item client-opts :my-table {:name \"Steve\" :age 24})
+      (put-item client-opts :my-table {:name \"Susan\" :age 27}))
+  (scan client-opts :my-table {:attr-conds {:age [:in [24 27]]}})
+  => [{:age 24, :name \"Steve\"} {:age 27, :name \"Susan\"}]
+
+  For automatic parallelization & segment control see `scan-parallel`.
+  For indexed item retrievel see `query`.
+
+  Ref. http://goo.gl/XfGKW for query+scan best practices."
+  [client-opts table
+   & [{:keys [attr-conds last-prim-kvs span-reqs return limit total-segments
+              segment return-cc?] :as opts
+       :or   {span-reqs {:max 5}}}]]
+  (letfn [(run1 [last-prim-kvs]
+            (as-map
+             (.scan (db-client client-opts)
+               (doto-cond [g (ScanRequest. (name table))]
+                 attr-conds      (.setScanFilter        (query|scan-conditions g))
+                 last-prim-kvs   (.setExclusiveStartKey
+                                  (clj-item->db-item last-prim-kvs))
+                 limit           (.setLimit             (int g))
+                 total-segments  (.setTotalSegments     (int g))
+                 segment         (.setSegment           (int g))
+                 (coll?* return) (.setAttributesToGet (mapv name return))
+                 return-cc? (.setReturnConsumedCapacity (utils/enum :total))
+                 (and return (not (coll?* return)))
+                 (.setSelect (utils/enum return))))))]
+    (merge-more run1 span-reqs (run1 last-prim-kvs))))
+#_
+(defn scan-parallel
+  "Like `scan` but starts a number of worker threads and automatically handles
+  parallel scan options (:total-segments and :segment). Returns a vector of
+  `scan` results.
+
+  Ref. http://goo.gl/KLwnn (official parallel scan documentation)."
+  [client-opts table total-segments & [opts]]
+  (let [opts (assoc opts :total-segments total-segments)]
+    (->> (mapv (fn [seg] (future (scan client-opts table (assoc opts :segment seg))))
+               (range total-segments))
+         (mapv deref))))
 ;;; Some quick tests
 #_
 (dotimes [i 100]
