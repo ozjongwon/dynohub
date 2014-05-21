@@ -360,6 +360,15 @@
                         map)
       {:cc-units (java->clojure (.getConsumedCapacity result))})))
 
+(defmacro query-or-scan-result [k r]
+  `(hash-map :items (mapv java->clojure (.getItems ~r))
+             :count (.getCount ~r)
+             :cc-units (java->clojure (.getConsumedCapacity ~r))
+             :last-prim-kvs (java->clojure (.getLastEvaluatedKey ~r))
+             ~@(when (= k :scan)
+                 `[:scanned-count (.getScannedCount ~r)])
+             ))
+
 ;;
 ;;FIXME:
 ;;      TODO make binary converter flexible
@@ -524,6 +533,14 @@
              :count (.getCount r)
              :cc-units (java->clojure (.getConsumedCapacity r))
              :last-prim-kvs (java->clojure (.getLastEvaluatedKey r))}))
+
+  QueryResult
+  (java->clojure [r]
+    (query-or-scan-result :query r))
+
+  ScanResult
+  (java->clojure [r]
+    (query-or-scan-result :scan r))
   )
 
 ;;;
@@ -748,7 +765,7 @@
                  (keyword? return) (.setSelect (keyword->DynamoDB-enum-str return))
                  return-cc?      (set-return-consumed-capacity-total)))))]
     (merge-more run1 span-reqs (run1 last-prim-kvs))))
-#_
+
 (defn scan
   "Retrieves items from a table (unindexed) with options:
     :attr-conds     - {<attr> [<comparison-operator> <val-or-vals>] ...}.
@@ -770,7 +787,7 @@
 
   (do (put-item client-opts :my-table {:name \"Steve\" :age 24})
       (put-item client-opts :my-table {:name \"Susan\" :age 27}))
-  (scan client-opts :my-table {:attr-conds {:age [:in [24 27]]}})
+  (scan client-opts :my-table :attr-conds {:age [:in [24 27]]})
   => [{:age 24, :name \"Steve\"} {:age 27, :name \"Susan\"}]
 
   For automatic parallelization & segment control see `scan-parallel`.
@@ -778,23 +795,21 @@
 
   Ref. http://goo.gl/XfGKW for query+scan best practices."
   [client-opts table
-   & [{:keys [attr-conds last-prim-kvs span-reqs return limit total-segments
-              segment return-cc?] :as opts
-       :or   {span-reqs {:max 5}}}]]
+   & {:keys [attr-conds last-prim-kvs span-reqs return limit total-segments
+             segment return-cc?] :as opts
+      :or   {span-reqs {:max 5}}}]
   (letfn [(run1 [last-prim-kvs]
-            (as-map
+            (java->clojure
              (.scan (db-client client-opts)
-               (doto-cond [g (ScanRequest. (name table))]
-                 attr-conds      (.setScanFilter        (query|scan-conditions g))
-                 last-prim-kvs   (.setExclusiveStartKey
-                                  (clj-item->db-item last-prim-kvs))
-                 limit           (.setLimit             (int g))
-                 total-segments  (.setTotalSegments     (int g))
-                 segment         (.setSegment           (int g))
-                 (coll?* return) (.setAttributesToGet (mapv name return))
-                 return-cc? (.setReturnConsumedCapacity (utils/enum :total))
-                 (and return (not (coll?* return)))
-                 (.setSelect (utils/enum return))))))]
+               (doto-cond (ScanRequest. (name table))
+                 attr-conds      (.setScanFilter        (make-DynamoDB-parts :conditions attr-conds))
+                 last-prim-kvs   (.setExclusiveStartKey (make-DynamoDB-parts :attribute-values last-prim-kvs))
+                 limit           (.setLimit             (int limit))
+                 total-segments  (.setTotalSegments     (int total-segments))
+                 segment         (.setSegment           (int segment))
+                 (vector? return) (.setAttributesToGet (mapv name return))
+                 (keyword? return) (.setSelect (keyword->DynamoDB-enum-str return))
+                 return-cc?     (set-return-consumed-capacity-total)))))]
     (merge-more run1 span-reqs (run1 last-prim-kvs))))
 #_
 (defn scan-parallel
