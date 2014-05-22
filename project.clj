@@ -10,7 +10,7 @@
   :global-vars {*warn-on-reflection* true
                 *assert* true}
   :dependencies
-  [[org.clojure/clojure        "1.5.1"]
+  [[org.clojure/clojure        "1.6.0"]
    [com.taoensso/encore        "1.6.0"]
    [com.taoensso/nippy         "2.6.3"]
    [com.amazonaws/aws-java-sdk "1.7.9" :exclusions [joda-time]]
