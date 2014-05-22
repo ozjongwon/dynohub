@@ -560,8 +560,7 @@
                                                                                 gsindexes))))]
     (if block?
       (do (Tables/waitForTableToBecomeActive client table-name)
-          ;; (describe-table table-name)
-          )
+          (describe-table client-opts table-name))
       (java->clojure result))))
 
 (defn ensure-table "Creates a table iff it doesn't already exist."
