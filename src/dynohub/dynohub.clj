@@ -560,7 +560,43 @@
           (describe-table client-opts table-name))
       (java->clojure result))))
 
-;;TODO (defn update-table
+(defn- throughput-series [[r1 w1] [r2 w2 :as target]]
+  (letfn [(next-n [n1 n2]
+            (if (> n1 n2)
+              n2
+              (min n2 (* 2 n1))))]
+    (loop [[r w :as r-w] [r1 w1] result []]
+      (if (= r-w target)
+        result
+        (let [ns [(next-n r r2) (next-n w w2)]]
+          (recur ns (conj result ns)))))))
+
+(defn update-table
+  [client-opts table throughput & {:keys [span-reqs]
+                                   :or   {span-reqs {:max 5}}}]
+
+  (let [{arg-read :read arg-write :write} throughput
+        {:keys [status throughput]} (describe-table client-opts table)
+        _ (assert (= status :active) (str "Table status is not active but " status))
+        {:keys [read write num-decreases-today]} throughput
+        _ (assert (and (or (< read arg-read) (< write arg-write))
+                       (< num-decreases-today 4))
+                  "Max 4 decreases per 24hr period")
+        throughput-series (throughput-series [read write] [arg-read arg-write])
+        _ (assert (<= (count throughput-series) (:max span-reqs))
+                  (str "Got max-reqs " (:max span-reqs) " needs at least " (count throughput-series)))
+        client (db-client client-opts)
+        table-name (name table)]
+      (letfn [(request-update [throughput]
+                (.updateTable client
+                              (UpdateTableRequest. table-name
+                                                   (make-DynamoDB-parts :provisioned-throughput throughput)))
+                (Tables/waitForTableToBecomeActive client table-name))]
+        (loop [[[r w] & series] throughput-series]
+          (let [result (request-update {:read r :write w})]
+            (if (empty? series)
+              (describe-table client-opts table-name)
+              (recur series)))))))
 
 (defn list-tables "Returns a vector of table names."
   [client-opts]
