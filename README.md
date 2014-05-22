@@ -31,3 +31,7 @@ See Faraday's [Connecting](https://github.com/ptaoussanis/faraday#connecting)
 ## License
 
 Copyright &copy; 2014 Jong-won Choi. Distributed under the [Eclipse Public License][], the same as Clojure.
+
+
+
+[Eclipse Public License]: <https://raw2.github.com/ozjongwon/dynohub/master/LICENSE>
