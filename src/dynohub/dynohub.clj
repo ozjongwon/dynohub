@@ -96,21 +96,17 @@
 
   (let [lru-cache (lru-cache (dec k))]
     (letfn [(find-memo [arg]
+              ;;(println :find-memo arg)
               (-> lru-cache (.get arg)))
             (update-memo [arg new-value]
+              ;;(println :update-memo arg)
               (-> lru-cache (.put arg new-value)))]
-      (fn [arg]
-        (if-let [found (find-memo arg)]
+      (fn [args]
+        (if-let [found (find-memo args)]
           found
-          (let [new-value (f arg)]
-            (update-memo arg new-value)
+          (let [new-value (f args)]
+            (update-memo args new-value)
             new-value))))))
-
-(defmacro defmemofn [memo-size name [& args] & body]
-  (let [internal-fn (symbol (str "%" name))]
-    `(do (defn- ~internal-fn [~@args]
-           ~@body)
-         (def ~name (bounded-memoize ~internal-fn ~memo-size)))))
 
 (defn error [s & more]
   (throw (Exception. (apply str more))))
@@ -155,40 +151,6 @@
 
 (defn- ensure-vector [e]
   (if (vector? e) e [e]))
-
-;;;;;;;;;;;;;;;;;;;;;
-(def ^:private db-client*
-  "Returns a new AmazonDynamoDBClient instance for the supplied client opts:
-    (db-client* {:access-key \"<AWS_DYNAMODB_ACCESS_KEY>\"
-                 :secret-key \"<AWS_DYNAMODB_SECRET_KEY>\"}),
-    (db-client* {:creds my-AWSCredentials-instance}),
-    etc."
-  (memoize
-   (fn [{:keys [provider creds access-key secret-key endpoint proxy-host proxy-port
-               conn-timeout max-conns max-error-retry socket-timeout]
-        :as client-opts}]
-     (if (empty? client-opts) (AmazonDynamoDBClient.) ; Default client
-       (let [creds (or creds (:credentials client-opts)) ; Deprecated opt
-             _ (assert (or (nil? creds) (instance? AWSCredentials creds)))
-             _ (assert (or (nil? provider) (instance? AWSCredentialsProvider provider)))
-             ^AWSCredentials aws-creds
-             (when-not provider
-               (cond
-                creds      creds ; Given explicit AWSCredentials
-                access-key (BasicAWSCredentials. access-key secret-key)
-                :else      (DefaultAWSCredentialsProviderChain.)))
-             client-config
-             (doto-cond (ClientConfiguration.)
-               proxy-host      (.setProxyHost         proxy-host)
-               proxy-port      (.setProxyPort         proxy-port)
-               conn-timeout    (.setConnectionTimeout conn-timeout)
-               max-conns       (.setMaxConnections    max-conns)
-               max-error-retry (.setMaxErrorRetry     max-error-retry)
-               socket-timeout  (.setSocketTimeout     socket-timeout))]
-         (doto-cond (AmazonDynamoDBClient. (or provider aws-creds) client-config)
-           endpoint (.setEndpoint endpoint)))))))
-
-(defn- db-client ^AmazonDynamoDBClient [client-opts] (db-client* client-opts))
 
 ;;;
 ;;; Simple binary reader/writer
@@ -319,7 +281,7 @@
      (dynamo-db-number? v) (.setN a (str v))
 
      ;; set
-     (set? v) (do (assert-true (not (empty? v)) (str "Invalid DynamoDB value: empty set: " v))
+     (set? v) (do (assert (not (empty? v)) (str "Invalid DynamoDB value: empty set: " v))
                   (cond
                    ;; ss
                    (every? string? v) (doto a (.setSS (vec v)))
@@ -539,9 +501,31 @@
           (when throttle-ms (Thread/sleep throttle-ms))
           (recur (merge-with merge-results last-result (more-f more))
                  (inc idx)))))))
+
+;;
+;; Client
+;;
+(defn- %db-client ^AmazonDynamoDBClient [{:keys [access-key secret-key endpoint] :as opts}]
+  (if (empty? opts)
+    (AmazonDynamoDBClient.)
+    (let [^AWSCredentials credentials (if access-key
+                                        (BasicAWSCredentials. access-key secret-key)
+                                        (DefaultAWSCredentialsProviderChain.))]
+      (doto-cond (AmazonDynamoDBClient. credentials)
+                 endpoint (.setEndpoint endpoint)))))
+
+(defonce db-client (bounded-memoize %db-client 64)) ;; 64 different cachedoptions
+
 ;;
 ;; Managing Tables
 ;;
+
+(defn describe-table
+  "Returns a map describing a table, or nil if the table doesn't exist."
+  [client-opts table]
+  (try (java->clojure (.describeTable (db-client client-opts)
+                                      (DescribeTableRequest. (name table))))
+       (catch ResourceNotFoundException _ nil)))
 
 (defn create-table
   "Creates a table with options:
@@ -575,13 +559,6 @@
       (do (Tables/waitForTableToBecomeActive client table-name)
           (describe-table client-opts table-name))
       (java->clojure result))))
-
-(defn describe-table
-  "Returns a map describing a table, or nil if the table doesn't exist."
-  [client-opts table]
-  (try (java->clojure (.describeTable (db-client client-opts)
-                                      (DescribeTableRequest. (name table))))
-       (catch ResourceNotFoundException _ nil)))
 
 ;;TODO (defn update-table
 
