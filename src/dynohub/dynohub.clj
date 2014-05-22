@@ -527,6 +527,7 @@
                                       (DescribeTableRequest. (name table))))
        (catch ResourceNotFoundException _ nil)))
 
+;; FIXME: asynch
 (defn create-table
   "Creates a table with options:
     hash-keydef   - [<name> <#{:s :n :ss :ns :b :bs}>].
@@ -571,6 +572,7 @@
         (let [ns [(next-n r r2) (next-n w w2)]]
           (recur ns (conj result ns)))))))
 
+;; FIXME: asynch
 (defn update-table
   [client-opts table throughput & {:keys [span-reqs]
                                    :or   {span-reqs {:max 5}}}]
