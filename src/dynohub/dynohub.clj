@@ -120,13 +120,13 @@
 (defn- get-bignum-precision [x]
   (.precision (if (string? x) (BigDecimal. ^String x) (bigdec x))))
 
-(defn- dynamo-db-number? [x]
+(defn- dynamo-db-number? [^Number x]
   (let [type (class x)]
     (or (contains? #{Long Double Integer Float} type)
         (and (contains? #{BigInt BigDecimal BigInteger} type)
              (<= (get-bignum-precision x) 38)))))
 
-(defn- str->dynamo-db-num [^String s]
+(defn- str->dynamo-db-num ^Number [^String s]
   (let [n (edn/read-string s)]
     (if (number? n)
       n
@@ -193,7 +193,7 @@
 ;;;
 ;;; Simple binary reader/writer
 ;;;
-(defn- sexp->byte-buffer [sexp]
+(defn- sexp->byte-buffer ^ByteBuffer [sexp]
   (-> (binding [*print-dup* true] (pr-str sexp))
       (.getBytes)
       (ByteBuffer/wrap)))
@@ -228,13 +228,13 @@
 ;; "HASH" "RANGE"
 ;; "KEYS_ONLY" "INCLUDE" "ALL"
 ;;
-(defn- DynamoDB-enum-str->keyword [^String s]
+(defn- DynamoDB-enum-str->keyword ^clojure.lang.Keyword [^String s]
   (-> s
       (str/replace "_" "-")
       (str/lower-case)
       (keyword)))
 
-(defn- keyword->DynamoDB-enum-str [^clojure.lang.Keyword k]
+(defn- keyword->DynamoDB-enum-str ^String [^clojure.lang.Keyword k]
   (when k
     (or (k {:> "GT" :>= "GE" :< "LT" :<= "LE" := "EQ"})
         (-> k
