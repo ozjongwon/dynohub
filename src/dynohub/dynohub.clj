@@ -515,20 +515,33 @@
      :cc-units    (java->clojure (.getConsumedCapacity r))})
   )
 
-;;;
-;;; Public API
-;;;
+;;;;
+;;;; Public API for Amazon DynamoDB operations
+;;;;
 
-(defn list-tables "Returns a vector of table names."
-  [client-opts]
-  (->> (db-client client-opts) (.listTables) (.getTableNames) (mapv keyword)))
-
-(defn describe-table
-  "Returns a map describing a table, or nil if the table doesn't exist."
-  [client-opts table]
-  (try (java->clojure (.describeTable (db-client client-opts)
-                                      (DescribeTableRequest. (name table))))
-       (catch ResourceNotFoundException _ nil)))
+(defonce cc-total (keyword->DynamoDB-enum-str :total))
+(defn- merge-more
+  "Enables auto paging for batch batch-get/write and query/scan requests.
+  Particularly useful for throughput limitations."
+  [more-f {max-reqs :max :keys [throttle-ms]} last-result]
+  ;;{:items {...}, :unprocessed {...}, :cc-units nil}
+  (loop [{:keys [items unprocessed last-prim-kvs] :as last-result} last-result idx 1]
+    (let [more (or unprocessed last-prim-kvs)]
+      (if (or (empty? more) (nil? max-reqs) (>= idx max-reqs))
+        (if items
+          (with-meta items (dissoc last-result :items))
+          last-result)
+        ;;{:items {:a {:b 2}}  :n1 2 :v1  [1 2]}
+        ;;{:items {:a {:b1 2}} :n1 3 :v1  [1 2]}
+        (let [merge-results (fn [l r] (cond (number? l) (+    l r)
+                                            (vector? l) (into l r)
+                                            :else               r))]
+          (when throttle-ms (Thread/sleep throttle-ms))
+          (recur (merge-with merge-results last-result (more-f more))
+                 (inc idx)))))))
+;;
+;; Managing Tables
+;;
 
 (defn create-table
   "Creates a table with options:
@@ -563,21 +576,25 @@
           (describe-table client-opts table-name))
       (java->clojure result))))
 
-(defn ensure-table "Creates a table iff it doesn't already exist."
-  [client-opts table-name hash-keydef & opts]
-  (when-not (describe-table client-opts table-name)
-    (create-table client-opts table-name hash-keydef opts)))
+(defn describe-table
+  "Returns a map describing a table, or nil if the table doesn't exist."
+  [client-opts table]
+  (try (java->clojure (.describeTable (db-client client-opts)
+                                      (DescribeTableRequest. (name table))))
+       (catch ResourceNotFoundException _ nil)))
 
-;;(defn update-table
+;;TODO (defn update-table
 
+(defn list-tables "Returns a vector of table names."
+  [client-opts]
+  (->> (db-client client-opts) (.listTables) (.getTableNames) (mapv keyword)))
 
 (defn delete-table [client-opts table]
   (java->clojure (.deleteTable (db-client client-opts) (DeleteTableRequest. (name table)))))
 
-(defmacro set-return-consumed-capacity-total [obj]
-  `(.setReturnConsumedCapacity ~obj ~(keyword->DynamoDB-enum-str :total)))
-
-(defonce cc-total (keyword->DynamoDB-enum-str :total))
+;;
+;; Reading data
+;;
 
 (defn get-item
   "Retrieves an item from a table by its primary key with options:
@@ -590,78 +607,7 @@
                                                        (make-DynamoDB-parts :attribute-values prim-kvs)
                                                        consistent?)
                                       attrs            (.setAttributesToGet (mapv name attrs))
-                                      return-cc?       (set-return-consumed-capacity-total)))))
-
-
-
-(defn put-item
-  "Adds an item (Clojure map) to a table with options:
-    :return   - e/o #{:none :all-old :updated-old :all-new :updated-new}.
-    :expected - A map of item attribute/condition pairs, all of which must be
-                met for the operation to succeed. e.g.:
-                  {<attr> <expected-value> ...}
-                  {<attr> false ...} ; Attribute must not exist"
-  [client-opts table item & {:keys [return expected return-cc?]
-                             :or   {return :none}}]
-  (java->clojure
-   (.putItem (db-client client-opts)
-             (doto-cond (PutItemRequest. (name table)
-                                         (make-DynamoDB-parts :attribute-values item)
-                                         (keyword->DynamoDB-enum-str return))
-                        expected (.setExpected     (make-DynamoDB-parts :expected-attribute-values expected))
-                        return-cc? (set-return-consumed-capacity-total)))))
-
-
-
-(defn update-item
-  "Updates an item in a table by its primary key with options:
-    prim-kvs   - {<hash-key> <val>} or {<hash-key> <val> <range-key> <val>}.
-    update-map - {<attr> [<#{:put :add :delete}> <optional value>]}.
-    :return    - e/o #{:none :all-old :updated-old :all-new :updated-new}.
-    :expected  - {<attr> <#{<expected-value> false}> ...}."
-  [client-opts table prim-kvs update-map & {:keys [return expected return-cc?]
-                                            :or   {return :none}}]
-  (java->clojure
-   (.updateItem (db-client client-opts)
-     (doto-cond (UpdateItemRequest. (name table)
-                                    (make-DynamoDB-parts :attribute-values prim-kvs)
-                                    (make-DynamoDB-parts :attribute-value-updates update-map)
-                                    (keyword->DynamoDB-enum-str return))
-       expected (.setExpected      (make-DynamoDB-parts :expected-attribute-values expected))
-       return-cc? (set-return-consumed-capacity-total)))))
-
-(defn delete-item
-  "Deletes an item from a table by its primary key.
-  See `put-item` for option docs."
-  [client-opts table prim-kvs & {:keys [return expected return-cc?]
-                                 :or   {return :none}}]
-  (java->clojure
-   (.deleteItem (db-client client-opts)
-     (doto-cond (DeleteItemRequest. (name table)
-                                    (make-DynamoDB-parts :attribute-values prim-kvs)
-                                    (keyword->DynamoDB-enum-str return))
-                expected (.setExpected     (make-DynamoDB-parts :expected-attribute-values expected))
-                return-cc? (set-return-consumed-capacity-total)))))
-
-(defn- merge-more
-  "Enables auto paging for batch batch-get/write and query/scan requests.
-  Particularly useful for throughput limitations."
-  [more-f {max-reqs :max :keys [throttle-ms]} last-result]
-  ;;{:items {...}, :unprocessed {...}, :cc-units nil}
-  (loop [{:keys [items unprocessed last-prim-kvs] :as last-result} last-result idx 1]
-    (let [more (or unprocessed last-prim-kvs)]
-      (if (or (empty? more) (nil? max-reqs) (>= idx max-reqs))
-        (if items
-          (with-meta items (dissoc last-result :items))
-          last-result)
-        ;;{:items {:a {:b 2}}  :n1 2 :v1  [1 2]}
-        ;;{:items {:a {:b1 2}} :n1 3 :v1  [1 2]}
-        (let [merge-results (fn [l r] (cond (number? l) (+    l r)
-                                            (vector? l) (into l r)
-                                            :else               r))]
-          (when throttle-ms (Thread/sleep throttle-ms))
-          (recur (merge-with merge-results last-result (more-f more))
-                 (inc idx)))))))
+                                      return-cc?       (.setReturnConsumedCapacity cc-total)))))
 
 (defn batch-get-item
   "Retrieves a batch of items in a single request.
@@ -685,31 +631,6 @@
                             (BatchGetItemRequest. raw-req cc-total))))]
     (when-not (empty? requests)
       (merge-more run1 span-reqs (run1 (make-DynamoDB-parts :keys-and-attributes requests))))))
-
-(defn batch-write-item
-  "Executes a batch of Puts and/or Deletes in a single request.
-   Limits apply, Ref. http://goo.gl/Bj9TC. No transaction guarantees are
-   provided, nor conditional puts. Request execution order is undefined.
-
-   (batch-write-item client-opts
-     {:users {:put    [{:user-id 1 :username \"sally\"}
-                       {:user-id 2 :username \"jane\"}]
-              :delete [{:user-id [3 4 5]}]}})
-
-  :span-reqs - {:max _ :throttle-ms _} allows a number of requests to
-  automatically be stitched together (to exceed throughput limits, for example)."
-  [client-opts requests & {:keys [return-cc? span-reqs] :as opts
-                           :or   {span-reqs {:max 5}}}]
-  (letfn [(run1 [raw-req]
-            (java->clojure
-             (.batchWriteItem (db-client client-opts)
-               (doto-cond (BatchWriteItemRequest. raw-req)
-                 return-cc? (set-return-consumed-capacity-total)))))]
-    (merge-more run1 span-reqs
-      (run1
-       (maphash (fn [[table-name table-req]]
-                  [(name table-name) (make-DynamoDB-parts :write-requests table-req)])
-                requests)))))
 
 (defn query
   "Retrieves items from a table (indexed) with options:
@@ -758,7 +679,7 @@
                  consistent?     (.setConsistentRead consistent?)
                  (vector? return) (.setAttributesToGet (mapv name return))
                  (keyword? return) (.setSelect (keyword->DynamoDB-enum-str return))
-                 return-cc?      (set-return-consumed-capacity-total)))))]
+                 return-cc?      (.setReturnConsumedCapacity cc-total)))))]
     (merge-more run1 span-reqs (run1 last-prim-kvs))))
 
 (defn scan
@@ -804,20 +725,84 @@
                  segment         (.setSegment           (int segment))
                  (vector? return) (.setAttributesToGet (mapv name return))
                  (keyword? return) (.setSelect (keyword->DynamoDB-enum-str return))
-                 return-cc?     (set-return-consumed-capacity-total)))))]
+                 return-cc?     (.setReturnConsumedCapacity cc-total)))))]
     (merge-more run1 span-reqs (run1 last-prim-kvs))))
-#_
-(defn scan-parallel
-  "Like `scan` but starts a number of worker threads and automatically handles
-  parallel scan options (:total-segments and :segment). Returns a vector of
-  `scan` results.
 
-  Ref. http://goo.gl/KLwnn (official parallel scan documentation)."
-  [client-opts table total-segments & [opts]]
-  (let [opts (assoc opts :total-segments total-segments)]
-    (->> (mapv (fn [seg] (future (scan client-opts table (assoc opts :segment seg))))
-               (range total-segments))
-         (mapv deref))))
+;;
+;; Modifying Data
+;;
+
+(defn put-item
+  "Adds an item (Clojure map) to a table with options:
+    :return   - e/o #{:none :all-old :updated-old :all-new :updated-new}.
+    :expected - A map of item attribute/condition pairs, all of which must be
+                met for the operation to succeed. e.g.:
+                  {<attr> <expected-value> ...}
+                  {<attr> false ...} ; Attribute must not exist"
+  [client-opts table item & {:keys [return expected return-cc?]
+                             :or   {return :none}}]
+  (java->clojure
+   (.putItem (db-client client-opts)
+             (doto-cond (PutItemRequest. (name table)
+                                         (make-DynamoDB-parts :attribute-values item)
+                                         (keyword->DynamoDB-enum-str return))
+                        expected (.setExpected     (make-DynamoDB-parts :expected-attribute-values expected))
+                        return-cc? (.setReturnConsumedCapacity cc-total)))))
+
+(defn update-item
+  "Updates an item in a table by its primary key with options:
+    prim-kvs   - {<hash-key> <val>} or {<hash-key> <val> <range-key> <val>}.
+    update-map - {<attr> [<#{:put :add :delete}> <optional value>]}.
+    :return    - e/o #{:none :all-old :updated-old :all-new :updated-new}.
+    :expected  - {<attr> <#{<expected-value> false}> ...}."
+  [client-opts table prim-kvs update-map & {:keys [return expected return-cc?]
+                                            :or   {return :none}}]
+  (java->clojure
+   (.updateItem (db-client client-opts)
+     (doto-cond (UpdateItemRequest. (name table)
+                                    (make-DynamoDB-parts :attribute-values prim-kvs)
+                                    (make-DynamoDB-parts :attribute-value-updates update-map)
+                                    (keyword->DynamoDB-enum-str return))
+       expected (.setExpected      (make-DynamoDB-parts :expected-attribute-values expected))
+       return-cc? (.setReturnConsumedCapacity cc-total)))))
+
+(defn delete-item
+  "Deletes an item from a table by its primary key.
+  See `put-item` for option docs."
+  [client-opts table prim-kvs & {:keys [return expected return-cc?]
+                                 :or   {return :none}}]
+  (java->clojure
+   (.deleteItem (db-client client-opts)
+     (doto-cond (DeleteItemRequest. (name table)
+                                    (make-DynamoDB-parts :attribute-values prim-kvs)
+                                    (keyword->DynamoDB-enum-str return))
+                expected (.setExpected     (make-DynamoDB-parts :expected-attribute-values expected))
+                return-cc? (.setReturnConsumedCapacity cc-total)))))
+
+(defn batch-write-item
+  "Executes a batch of Puts and/or Deletes in a single request.
+   Limits apply, Ref. http://goo.gl/Bj9TC. No transaction guarantees are
+   provided, nor conditional puts. Request execution order is undefined.
+
+   (batch-write-item client-opts
+     {:users {:put    [{:user-id 1 :username \"sally\"}
+                       {:user-id 2 :username \"jane\"}]
+              :delete [{:user-id [3 4 5]}]}})
+
+  :span-reqs - {:max _ :throttle-ms _} allows a number of requests to
+  automatically be stitched together (to exceed throughput limits, for example)."
+  [client-opts requests & {:keys [return-cc? span-reqs] :as opts
+                           :or   {span-reqs {:max 5}}}]
+  (letfn [(run1 [raw-req]
+            (java->clojure
+             (.batchWriteItem (db-client client-opts)
+               (doto-cond (BatchWriteItemRequest. raw-req)
+                 return-cc? (.setReturnConsumedCapacity cc-total)))))]
+    (merge-more run1 span-reqs
+      (run1
+       (maphash (fn [[table-name table-req]]
+                  [(name table-name) (make-DynamoDB-parts :write-requests table-req)])
+                requests)))))
 
 (comment
   ;;; Some quick tests
