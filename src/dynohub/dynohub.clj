@@ -255,7 +255,7 @@
 ;;; Java -> Clojure Mapping
 ;;;
 
-(defprotocol Java<->Coljure
+(defprotocol Java->Coljure
   (java->clojure [x]))
 
 (defmulti make-DynamoDB-parts (fn [elem & _] elem))
@@ -268,8 +268,8 @@
   (ProvisionedThroughput. (long read-units) (long write-units)))
 
 (defmethod make-DynamoDB-parts :attribute-definitions [_  hash-keydef range-keydef lsindexes gsindexes]
-  (->> `[~@hash-keydef ~@range-keydef ~@(mapcat :range-keydef lsindexes)
-         ~@(mapcat :hash-keydef gsindexes) ~@(mapcat :range-keydef gsindexes)]
+  (->> `(~@hash-keydef ~@range-keydef ~@(mapcat :range-keydef lsindexes)
+         ~@(mapcat :hash-keydef gsindexes) ~@(mapcat :range-keydef gsindexes))
        (apply hash-map)
        (mapv (fn [[n t :as def]]
                (assert (t #{:s :n :b :ss :ns :bs}) (str "Invalid keydef: " def))
@@ -315,7 +315,6 @@
      ;; s
      (string? v) (do (assert (not (empty? v)) (str "Invalid DynamoDB value: empty string: " v))
                      (.setS a v))
-
      ;; n
      (dynamo-db-number? v) (.setN a (str v))
 
@@ -328,7 +327,6 @@
                    (every? dynamo-db-number? v) (doto a (.setNS (mapv str  v)))
                    ;; bs
                    :else (doto a (.setBS (mapv *binary-writer* v)))))
-
      ;; b
      :else (.setB a (*binary-writer* v)))
     a))
@@ -405,16 +403,13 @@
              :cc-units (java->clojure (.getConsumedCapacity ~r))
              :last-prim-kvs (java->clojure (.getLastEvaluatedKey ~r))
              ~@(when (= k :scan)
-                 `[:scanned-count (.getScannedCount ~r)])
-             ))
+                 `(:scanned-count (.getScannedCount ~r)))))
 
 ;;;
 ;;; Implementation of java->clojure
 ;;;
-(extend-protocol Java<->Coljure
+(extend-protocol Java->Coljure
   nil (java->clojure [_] nil)
-
-;;  java.lang.Boolean (java->clojure [v] v)
 
   java.util.ArrayList (java->clojure [a] (mapv java->clojure a))
 
@@ -459,8 +454,6 @@
                       :last-decrease       (.getLastDecreaseDateTime d)
                       :last-increase       (.getLastIncreaseDateTime d)
                       :num-decreases-today (.getNumberOfDecreasesToday d)})
-
-;;  AttributeDefinition
 
   LocalSecondaryIndexDescription
   (java->clojure [d] (inline-secondary-index-description-result d))
