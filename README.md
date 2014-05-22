@@ -15,8 +15,8 @@ Most parts of Faraday documentation can be served as Dynohub documentation.
 Add the necessary dependency to your [Leiningen][] `project.clj` and `require` the library in your ns:
 
 ```clojure
-[com.pegotezzi/dynohub "0.0.1"] ; project.clj
-(ns my-app (:require [pegotezzi.dynohub :as dh])) ; ns
+[com.ozjongwon/dynohub "0.0.1"] ; project.clj
+(ns my-app (:require [ozjongwon.dynohub :as dh])) ; ns
 ```
 
 ### Preparing a database

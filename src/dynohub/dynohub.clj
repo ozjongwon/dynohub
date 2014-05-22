@@ -1,4 +1,4 @@
-(ns pegotezzi.dynohub
+(ns ozjongwon.dynohub
   "Clojure DynamoDB client. This experimental project started from Faraday by Peter Taoussanis.
   Ref. https://github.com/ptaoussanis/faraday (Faraday),
        http://goo.gl/22QGA (DynamoDBv2 API)"

@@ -8,8 +8,8 @@
 ;;
 ;;
 ;;;; Code:
-(ns pegotezzi.dynolite
-  (:require [pegotezzi.dynohub  :as hub]))
+(ns ozjongwon.dynolite
+  (:require [ozjongwon.dynohub  :as dh]))
 
 ;;
 ;; DynamoDB connection
@@ -25,14 +25,14 @@
           :else  (recur remains (conj result arg)))))
 
 (defmacro hub-fn->lite-fn [fn-name]
-  (let [meta (meta (ns-resolve (find-ns 'pegotezzi.dynohub) fn-name))
+  (let [meta (meta (ns-resolve (find-ns 'ozjongwon.dynohub) fn-name))
         [args] (:arglists meta)
         doc  (:doc meta)]
     (when-not args
-      (throw (Exception. (str "No functions " fn-name " found in ns 'pegotezzi.dynohub'"))))
+      (throw (Exception. (str "No functions " fn-name " found in ns 'ozjongwon.dynohub'"))))
     (let [[new-args extra] (hub-args->lite-args args)]
       `(defn ~fn-name ~@(when doc [doc]) [~@new-args ~@extra]
-         (apply ~(symbol (str "pegotezzi.dynohub/" fn-name))
+         (apply ~(symbol (str "ozjongwon.dynohub/" fn-name))
           @default-client-opts
           ~@(when new-args new-args)
           ~(when extra `(mapcat #(into [] %) ~'opts)))))))

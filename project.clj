@@ -1,7 +1,7 @@
 (defproject com.pegotezzy/dynohub "0.0.1-SNAPSHOT"
   :author "Jong-won Choi"
   :description "Clojure DynamoDB client"
-  :url "https://github.com/pegotezzi/dynohub"
+  :url "https://github.com/ozjongwon/dynohub"
   :license {:name "Eclipse Public License"
             :url  "http://www.eclipse.org/legal/epl-v10.html"
             :distribution :repo
