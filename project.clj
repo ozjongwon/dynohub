@@ -20,9 +20,9 @@
   :profiles
   {;; :default [:base :system :user :provided :dev]
    :1.6  {:dependencies [[org.clojure/clojure    "1.6.0"]]}
-   :test {:dependencies [[expectations           "2.0.6"]
+   :test {:dependencies [;;[expectations           "2.0.6"]
                          [org.clojure/test.check "0.5.8"]]
-          :plugins [[lein-expectations "0.0.8"]
+          :plugins [;;[lein-expectations "0.0.8"]
                     [lein-autoexpect   "1.2.2"]]}
    :dev* [:dev {:jvm-opts ^:replace ["-server"]
                 ;; :hooks [cljx.hooks leiningen.cljsbuild] ; cljx
