@@ -115,7 +115,6 @@
 (defn error [s & more]
   (throw (Exception. (apply str more))))
 
-(def mapset (comp set mapv))
 (def maphash (comp (partial apply hash-map) mapcat))
 
 (defn- get-bignum-precision [x]
@@ -131,7 +130,7 @@
   (let [n (edn/read-string s)]
     (if (number? n)
       n
-      (throw (Exception. (str "Invalid number type value " s " from DynamoDB!"))))))
+      (error (str "Invalid number type value " s " from DynamoDB!")))))
 
 (defmacro doto-cond "My own version of doto-cond"
   [exp & clauses]
@@ -146,14 +145,6 @@
     `(let [~g ~exp]
        ~@sexps
        ~g)))
-
-(defmacro clojure->java-using-mapv [sexp args]
-  (if (vector? args)
-     `(mapv #(clojure->java ~sexp %) ~args)
-     `(let [args# ~args]
-        (assert (vector? args#))
-        (mapv #(clojure->java ~sexp %) args#))))
-
 
 (defn- cartesian-product [& seqs]
   ;; From Pascal Costanza's CL code
@@ -202,7 +193,7 @@
 ;;;
 ;;; Simple binary reader/writer
 ;;;
-(defn- sexp->str [sexp]
+(defn- sexp->byte-buffer [sexp]
   (-> (binding [*print-dup* true] (pr-str sexp))
       (.getBytes)
       (ByteBuffer/wrap)))
@@ -212,7 +203,7 @@
       (String.)
       (edn/read-string)))
 
-(def ^:dynamic *binary-writer* sexp->str)
+(def ^:dynamic *binary-writer* sexp->byte-buffer)
 (def ^:dynamic *binary-reader* byte-buffer->sexp)
 
 (defmacro with-binary-reader-writer [[& {:keys [writer reader]
@@ -265,18 +256,16 @@
 ;;;
 
 (defprotocol Java<->Coljure
-  (java->clojure [x])
-  (clojure->java [x args]))
+  (java->clojure [x]))
 
 (defmulti make-DynamoDB-parts (fn [elem & _] elem))
 
 (defmethod make-DynamoDB-parts :key-schema-elements [_ [hname _] [rname _]]
-  (clojure->java-using-mapv (KeySchemaElement.) `[[~hname :hash] ~@(when rname [[rname :range]])]))
+  (mapv (fn [[n k]] (KeySchemaElement. (name n) (keyword->DynamoDB-enum-str k)))
+                            `([~hname :hash] ~@(when rname [[rname :range]]))))
 
 (defmethod make-DynamoDB-parts :provisioned-throughput [_ {read-units :read write-units :write :as throughput}]
-  (assert (and read-units write-units)
-          (str "Malformed throughput: " throughput))
-  (clojure->java (ProvisionedThroughput.) [read-units write-units]))
+  (ProvisionedThroughput. (long read-units) (long write-units)))
 
 (defmethod make-DynamoDB-parts :attribute-definitions [_  hash-keydef range-keydef lsindexes gsindexes]
   (->> `[~@hash-keydef ~@range-keydef ~@(mapcat :range-keydef lsindexes)
@@ -284,8 +273,7 @@
        (apply hash-map)
        (mapv (fn [[n t :as def]]
                (assert (t #{:s :n :b :ss :ns :bs}) (str "Invalid keydef: " def))
-               [n t]))
-       (clojure->java-using-mapv (AttributeDefinition.))))
+               (AttributeDefinition. (name n) (keyword->DynamoDB-enum-str t))))))
 
 (defmethod make-DynamoDB-parts :local-secondary-indexes [_ hash-keydef lsindexes]
   (->> lsindexes
@@ -296,47 +284,81 @@
                (make-DynamoDB-parts :key-schema-elements
                                     hash-keydef range-keydef)
                (make-DynamoDB-parts :projection projection)]))
-       (clojure->java-using-mapv (LocalSecondaryIndex.))))
+       (mapv (fn [[n ks p]]
+               (doto (LocalSecondaryIndex.)
+                 (.setAttributeName n)
+                 (.setKeySchema ks)
+                 (.setProjection p))))))
 
 (defmethod make-DynamoDB-parts :projection [_ projection]
-  (clojure->java (Projection.) (cond (keyword? projection) [projection]
-                                     (vector? projection) [:include (mapv name projection)]
-                                     :else (error "Unknown projection type(and value): " projection))))
+  (let [[projection-type non-key-attributes] (cond (keyword? projection) [projection]
+                                                   (vector? projection) [:include (mapv name projection)]
+                                                   :else (error "Unknown projection type(and value): " projection))]
+    (doto-cond (Projection.)
+               true (.setProjectionType projection-type)
+               non-key-attributes (.setNonKeyAttributes non-key-attributes))))
 
 (defmethod make-DynamoDB-parts :global-secondary-indexes [_ gsindexes]
   (->> gsindexes
        (map (fn [{:keys [name hash-keydef range-keydef projection throughput] :or {projection :all} :as index}]
               (assert (and name hash-keydef range-keydef projection throughput)
                       (str "Malformed global secondary index (GSI): " index))
-              [name
-               (make-DynamoDB-parts :key-schema-elements
-                                    hash-keydef range-keydef)
-               (make-DynamoDB-parts :projection projection)
-               (make-DynamoDB-parts :provisioned-throughput throughput)]))
-       (clojure->java-using-mapv (GlobalSecondaryIndex.))))
+              (doto (GlobalSecondaryIndex.)
+                (.setAttributeName name)
+                (.setKeySchema (make-DynamoDB-parts :key-schema-elements hash-keydef range-keydef))
+                (.setProjection (make-DynamoDB-parts :projection projection))
+                (.setProvisionedThroughput (make-DynamoDB-parts :provisioned-throughput throughput)))))))
+
+(defmethod make-DynamoDB-parts :attribute-value [_ v]
+  (let [a (AttributeValue.)]
+    (cond
+     ;; s
+     (string? v) (do (assert (not (empty? v)) (str "Invalid DynamoDB value: empty string: " v))
+                     (.setS a v))
+
+     ;; n
+     (dynamo-db-number? v) (.setN a (str v))
+
+     ;; set
+     (set? v) (do (assert-true (not (empty? v)) (str "Invalid DynamoDB value: empty set: " v))
+                  (cond
+                   ;; ss
+                   (every? string? v) (doto a (.setSS (vec v)))
+                   ;; ns
+                   (every? dynamo-db-number? v) (doto a (.setNS (mapv str  v)))
+                   ;; bs
+                   :else (doto a (.setBS (mapv *binary-writer* v)))))
+
+     ;; b
+     :else (.setB a (*binary-writer* v)))
+    a))
+
 
 (defmethod make-DynamoDB-parts :attribute-values [_ prim-kvs]
   (maphash (fn [[k v]]
-             [(name k) (clojure->java (AttributeValue.) v)])
+             [(name k) (make-DynamoDB-parts :attribute-value v)])
            prim-kvs))
 
 (defmethod make-DynamoDB-parts :expected-attribute-values [_ expected]
   (maphash (fn [[k v]]
              [(name k) (ExpectedAttributeValue. (if (= v false)
                                                   false
-                                                  (clojure->java (AttributeValue.) v)))])
+                                                  (make-DynamoDB-parts :attribute-value v)))])
            expected))
 
 (defmethod make-DynamoDB-parts :attribute-value-updates [_ update-map]
   (when-not (empty? update-map)
     (maphash (fn [[k [action val]]]
-               [(name k) (AttributeValueUpdate. (clojure->java (AttributeValue.) val)
+               [(name k) (AttributeValueUpdate. (make-DynamoDB-parts :attribute-value val)
                                                 (keyword->DynamoDB-enum-str action))])
              update-map)))
 
 (defmethod make-DynamoDB-parts :keys-and-attributes [_ requests]
-  (maphash (fn [[k v]]
-             [(name k) (clojure->java (KeysAndAttributes.) v)])
+  (maphash (fn [[k {:keys [prim-kvs attrs consistent?]}]]
+             [(name k) (doto-cond (KeysAndAttributes.)
+                                  true (.setKeys (make-DynamoDB-parts :key-attributes prim-kvs))
+                                  attrs (.setAttributesToGet (mapv name attrs))
+                                  consistent? (.setConsistentRead  consistent?))])
            requests))
 
 (defmethod make-DynamoDB-parts :key-attributes [_ prim-kvs]
@@ -354,9 +376,11 @@
 
 (defmethod make-DynamoDB-parts :conditions [_ conds]
   (when-not (empty? conds)
-    (maphash (fn [[k v]]
+    (maphash (fn [[k [op v]]]
                (assert (vector v) (str "Malformed condition: " v))
-               [(name k) (clojure->java (Condition.) v)])
+               [(name k) (doto (Condition.)
+                           (.setComparisonOperator (keyword->DynamoDB-enum-str op))
+                           (.setAttributeValueList (mapv #(AttributeValue. %) (ensure-vector v))))])
              conds)))
 
 (defmethod make-DynamoDB-parts :write-requests [_ table-req]
@@ -385,7 +409,7 @@
              ))
 
 ;;;
-;;; Implementation of java->clojure and clojure->java
+;;; Implementation of java->clojure
 ;;;
 (extend-protocol Java<->Coljure
   nil (java->clojure [_] nil)
@@ -405,39 +429,10 @@
   KeySchemaElement
   (java->clojure [e] {:name (keyword (.getAttributeName e))
                       :type (DynamoDB-enum-str->keyword (.getKeyType e))})
-  (clojure->java [e [n t]] (doto e
-                             (.setAttributeName (name n))
-                             (.setKeyType (keyword->DynamoDB-enum-str t))))
-
-  ProvisionedThroughput
-  (clojure->java [pt [ru wu]] (doto pt
-                                (.setReadCapacityUnits  (long ru))
-                                (.setWriteCapacityUnits (long wu))))
 
   AttributeDefinition
   (java->clojure [d] {:name (keyword (.getAttributeName d))
                       :type (DynamoDB-enum-str->keyword (.getAttributeType d))})
-  (clojure->java [ad [n t]] (doto ad
-                              (.setAttributeName (name n))
-                              (.setAttributeType (keyword->DynamoDB-enum-str t))))
-
-  LocalSecondaryIndex
-  (clojure->java [lsi [n ks p]] (doto lsi
-                                  (.setAttributeName n)
-                                  (.setKeySchema ks)
-                                  (.setProjection p)))
-
-  Projection
-  (clojure->java [p [pt attrs]] (doto-cond p
-                                   true  (.setProjectionType pt)
-                                   (and (= pt :include) attrs) (.setNonKeyAttributes pr attrs)))
-
-  GlobalSecondaryIndex
-  (clojure->java [gsi [n ks proj prov]] (doto gsi
-                                                (.setAttributeName n)
-                                                (.setKeySchema ks)
-                                                (.setProjection proj)
-                                                (.setProvisionedThroughput prov)))
 
   DeleteTableResult
   (java->clojure [r] (java->clojure (.getTableDescription r)))
@@ -474,27 +469,6 @@
   (java->clojure [d] (inline-secondary-index-description-result d :throughput? true))
 
   AttributeValue
-  (clojure->java [a v]
-    (cond
-     ;; s
-     (string? v) (do (assert (not (empty? v)) (str "Invalid DynamoDB value: empty string: " v))
-                     (doto a (.setS v)))
-     ;; n
-     (dynamo-db-number? v) (doto a (.setN (str v)))
-
-     ;; set
-     (set? v) (do (assert (not (empty? v)) (str "Invalid DynamoDB value: empty set: " v))
-                  (cond
-                   ;; ss
-                   (every? string? v) (doto a (.setSS (vec v)))
-                   ;; ns
-                   (every? dynamo-db-number? v) (doto a (.setNS (mapv str  v)))
-                   ;; bs
-                   :else (doto a (.setBS (mapv *binary-writer* v)))))
-
-     ;; b
-     :else (doto a (.setB (*binary-writer* v)))))
-
   (java->clojure [av] (or (.getS av)
                           (some->> (.getN  av) str->dynamo-db-num)
                           (some->> (.getSS av) (into #{}))
@@ -521,25 +495,11 @@
   DescribeTableResult
   (java->clojure [r] (java->clojure (.getTable r)))
 
-
-  KeysAndAttributes
-  (clojure->java [ka {:keys [prim-kvs attrs consistent?]}]
-    (doto-cond ka
-       attrs            (.setAttributesToGet (mapv name attrs))
-       consistent?      (.setConsistentRead  consistent?)
-       true             (.setKeys (make-DynamoDB-parts :key-attributes prim-kvs))))
-
   BatchGetItemResult
   (java->clojure [r]
     {:items       (java->clojure (.getResponses r))
      :unprocessed (.getUnprocessedKeys r)
      :cc-units    (java->clojure (.getConsumedCapacity r))})
-
-  Condition
-  (clojure->java [c [op v]]
-    (doto c
-      (.setComparisonOperator (keyword->DynamoDB-enum-str op))
-      (.setAttributeValueList (mapv #(AttributeValue. %) (ensure-vector v)))))
 
   QueryResult
   (java->clojure [r]
