@@ -25,7 +25,6 @@
 
 (deftest basic-table-tests
   (testing "Basic table tests"
-    (clear-all-tables)
     (let [new-opts {:access-key "test-accesskey" :secret-key "test-secretkey"
                     :endpoint "http://localhost:8000"}
           [table1 hash-keydef1]  [:test-table [:hash-keydef1 :s]]]
@@ -34,7 +33,8 @@
         (dl/set-default-client-opts new-opts)
         (is (= new-opts @dl/default-client-opts)))
 
-      (testing "Initially there are no tables"
+      (testing "There are no tables after calling 'delete-table'"
+        (clear-all-tables)
         (is (empty? (dl/list-tables))))
 
       (testing "create a simple table with hash-keydef only"
