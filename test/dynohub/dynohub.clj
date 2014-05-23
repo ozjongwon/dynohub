@@ -32,7 +32,7 @@
        (dl/set-default-client-opts ~test-opts))
      (clear-all-tables)
      (doseq [[name# def#] ~table-name-def-map]
-       (dl/create-table name# def#))
+       (apply dl/create-table name# def#))
      ~@body))
 
 (deftest basic-table-tests
@@ -81,36 +81,35 @@
 
 (deftest basic-data-access
   (testing "Basic reading/writing data tests - put, batch-write, get, batch-get, query, scan"
-    (with-test-env [{:access-test1 [:id :n] :access-test2 [:name :s]}]
+    (with-test-env [{:country-state [[:country :s] :range-keydef [:state :s]]
+                     :area-phone [[:area-number :n] :range-keydef [:phone-number :n]]}]
       (testing "Put items"
-        (dl/put-item :access-test1 {:id 1 :name "first item"})
-        (let [scan-result (dl/scan :access-test1)]
+        (dl/put-item :country-state {:country "AU" :state "NSW" :suburb "Artarmon"})
+        (let [scan-result (dl/scan :country-state)]
           (is (= 1 (count scan-result)))
-          (is (= {:id 1 :name "first item"} (first scan-result)))))
+          (is (= {:country "AU" :state "NSW" :suburb "Artarmon"} (first scan-result)))))
 
-      (testing "batch-write"
-        (dl/batch-write-item {:access-test1 {:delete [{:id 1}]
-                                             :put [{:id 2 :name "name2"}
-                                                   {:id 3 :name "name3"}]}
-                              :access-test2  {:put [{:name "1name" :true? true :false? false }
-                                                   {:name "2name" :list (list 1 2 3)}]}})
-        (is (= 2 (count (dl/scan :access-test1))))
-        (is (= 2 (count (dl/scan :access-test2)))))
+      (testing "batch-write with overwriting existing data"
+        (dl/batch-write-item {:country-state {:put [{:country "AU" :state "NSW" :suburb "Chatswood"}
+                                                    {:country "AU" :state "QLD" :suburb "CBD"}]}
+                              :area-phone  {:put [{:area-number 1 :phone-number 1234 :name "Stig"}
+                                                  {:area-number 1 :phone-number 2345 :name "Finn"}]}})
+        (is (= 2 (count (dl/scan :country-state))))
+        (is (= 2 (count (dl/scan :area-phone)))))
 
       (testing "batch-get"
-        (let [batch-get-result (dl/batch-get-item {:access-test1 {:prim-kvs {:id [1 2 3]}}
-                                                   :access-test2 {:prim-kvs {:name ["1name" "2name"]
-                                                                             }}
+        (let [batch-get-result (dl/batch-get-item {:country-state {:prim-kvs {:country "AU" :state ["NSW" "QLD"]}}
+                                                   :area-phone    {:prim-kvs {:area-number [1] :phone-number [1234 2345]}}
                                                    })]
-          (is (= 2 (count (:access-test1 batch-get-result))))
-          (is (= 2 (count (:access-test2 batch-get-result))))))
+          (is (= 2 (count (:country-state batch-get-result))))
+          (is (= 2 (count (:area-phone batch-get-result))))))
 
       (testing "query"
-        (let [q1 (dl/query :access-test1 {:id [:between [2 10]]})
-              q2 (dl/query :access-test1 {:id [:eq 3]})
-              q3 (dl/query :access-test2 {:name [:lt "foo"]})]
-          (is (= 2 (count q1)))
-          (is (= 1 (count q2)))
+        (let [q1 (dl/query :country-state {:country [:eq "AU"] :state [:begins-with "N"]})
+              q2 (dl/query :area-phone    {:area-number [:eq 1] :phone-number [:between [1 3000]]})
+              q3 (dl/query :country-state {:country [:eq "AU"] :state [:gt "P"]})]
+          (is (= 1 (count q1)))
+          (is (= 2 (count q2)))
           (is (= 1 (count q3)))))
       )))
 
