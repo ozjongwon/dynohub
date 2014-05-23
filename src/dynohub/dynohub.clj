@@ -581,9 +581,9 @@
         {:keys [status throughput]} (describe-table client-opts table)
         _ (assert (= status :active) (str "Table status is not active but " status))
         {:keys [read write num-decreases-today]} throughput
-        _ (assert (and (or (< read arg-read) (< write arg-write))
-                       (< num-decreases-today 4))
-                  "Max 4 decreases per 24hr period")
+        _ (assert (or (and (< read arg-read) (< write arg-write))
+                      (< num-decreases-today 4))
+                  (str "Max 4 decreases per 24hr period " (seq (interpose " " [arg-read read arg-write write num-decreases-today]))))
         throughput-series (throughput-series [read write] [arg-read arg-write])
         _ (assert (<= (count throughput-series) (:max span-reqs))
                   (str "Got max-reqs " (:max span-reqs) " needs at least " (count throughput-series)))
