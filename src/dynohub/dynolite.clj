@@ -49,8 +49,7 @@
 (defn set-default-client-opts [opts]
   (reset! default-client-opts opts))
 
-(hub-fns->lite-fns [batch-get-item batch-write-item create-table delete-item delete-table describe-table get-item list-tables put-item query scan update-item ;;update-table
-                    ])
+(hub-fns->lite-fns [batch-get-item batch-write-item create-table delete-item delete-table describe-table get-item list-tables put-item query scan update-item update-table])
 
 (defn ensure-table "Creates a table iff it doesn't already exist."
   [client-opts table-name hash-keydef & opts]
