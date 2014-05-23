@@ -111,6 +111,29 @@
           (is (= 1 (count q1)))
           (is (= 2 (count q2)))
           (is (= 1 (count q3)))))
+
+      (testing "Update item using update-item"
+        (dl/update-item :country-state {:country "AU" :state "NSW"} {:country-code [:put 1]
+                                                                     :suburb-codes [:put #{111 222}]
+                                                                     :suburbs [:put #{"CBD" "Artarmon"}]})
+        (let [au-nsw (dl/get-item :country-state {:country "AU" :state "NSW"})]
+          (is (= (:suburbs au-nsw) #{"CBD" "Artarmon"}))
+          (is (= (:country-code au-nsw) 1))))
+
+      (testing "Update item using :add and :delete of update-item"
+        (dl/update-item :country-state {:country "AU" :state "NSW"} {:country-code [:add 60]
+                                                                     :suburb-codes [:add #{1 2}]
+                                                                     :suburbs [:delete #{"CBD" "ZZZ"}]
+                                                                     })
+        (let [au-nsw (dl/get-item :country-state {:country "AU" :state "NSW"})]
+          (is (= (:suburbs au-nsw) #{"Artarmon"}))
+          (is (= (:country-code au-nsw) 61))))
+
+      (testing "Delete item using batch-write"
+        (dl/batch-write-item {:country-state {:delete [{:country "AU" :state "NSW"}]}
+                              :area-phone    {:delete [{:area-number 1 :phone-number 1234}]}})
+        (is (= (count (dl/scan :country-state)) 1))
+        (is (= (count (dl/scan :area-phone)) 1)))
       )))
 
 
