@@ -106,9 +106,9 @@
           (is (= 2 (count (:access-test2 batch-get-result))))))
 
       (testing "query"
-        (let [q1 (dl/query :access-test1 {:id [:between 2 10]})
+        (let [q1 (dl/query :access-test1 {:id [:between [2 10]]})
               q2 (dl/query :access-test1 {:id [:eq 3]})
-              q3 (dl/query :access-test2 {:name [:in ["2name" "foo"]]})]
+              q3 (dl/query :access-test2 {:name [:lt "foo"]})]
           (is (= 2 (count q1)))
           (is (= 1 (count q2)))
           (is (= 1 (count q3)))))
