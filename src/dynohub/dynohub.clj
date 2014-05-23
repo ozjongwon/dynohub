@@ -340,7 +340,8 @@
                (assert (vector v) (str "Malformed condition: " v))
                [(name k) (doto (Condition.)
                            (.setComparisonOperator (keyword->DynamoDB-enum-str op))
-                           (.setAttributeValueList (mapv #(AttributeValue. %) (ensure-vector v))))])
+                           (.setAttributeValueList (mapv #(make-DynamoDB-parts :attribute-value %)
+                                                         (ensure-vector v))))])
              conds)))
 
 (defmethod make-DynamoDB-parts :write-requests [_ table-req]
