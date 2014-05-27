@@ -12,8 +12,7 @@
   (:require [clojure.test :as test :refer :all]
             [ozjongwon.dynohub :as dh]
             [ozjongwon.dynolite :as dl]
-;            [taoensso.encore  :as encore]
-;            [taoensso.nippy   :as nippy]
+            [taoensso.nippy.tools   :as nippy-tools]
             )
   #_
   (:import  [com.amazonaws.auth BasicAWSCredentials]
@@ -60,22 +59,22 @@
         (is (= '(1 1) (map (:throughput table-description) [:read :write]))))
 
       (testing "Update throughput then check it after increasing throughput"
-        (dl/update-table table1 {:write 30 :read 10})
+        (dl/update-table table1 {:write 30 :read 10} :block? true)
         (is (= '(10 30) (map (:throughput (dl/describe-table table1)) [:read :write]))))
 
       (testing "Decrease throughput"
-        (dl/update-table table1 {:write 3 :read 1})
+        (dl/update-table table1 {:write 3 :read 1} :block? true)
         (is (= '(1 3)  (map (:throughput (dl/describe-table table1)) [:read :write]))))
 
       (testing "Increase throughput to max-req = 5"
         ;; :read 32 needs 5 requests
-        (dl/update-table table1 {:write 1 :read 32})
+        (dl/update-table table1 {:write 1 :read 32} :block? true)
         (is (= '(32 1)  (map (:throughput (dl/describe-table table1)) [:read :write]))))
 
       (testing "Increase throughput to max-req < 6"
         ;; :write 64 needs 6 requests
         (is (thrown-with-msg? java.lang.AssertionError #"Got max-reqs "
-              (dl/update-table table1 {:write 64 :read 1}))))
+              (dl/update-table table1 {:write 64 :read 1} :block? true))))
 
     ))))
 
@@ -136,9 +135,13 @@
         (is (= (count (dl/scan :area-phone)) 1)))
       )))
 
-
-;;(create-table :site11 [:owner-email :s] :range-keydef [:name :s] :block? true :throughput {:read 1 :write 1})
-
-
+(deftest binary-reader-writer
+  (testing "Binary reader/writer tests with macro [with|without]-binary-reader-writer"
+    (let [test-code `(defn foo [] :foo)]
+      (with-test-env [{:code [[:page :n]]}]
+        (testing "Put items without-binary-reader-writer"
+          (is (thrown? java.lang.ClassCastException
+                       (dl/without-binary-reader-writer []
+                          (dl/put-item :code {:page 10 :code test-code})))))))))
 
 ;;; DYNOHUB.CLJ ends here
