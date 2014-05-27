@@ -573,8 +573,8 @@
           (recur ns (conj result ns)))))))
 
 (defn update-table
-  [client-opts table throughput & {:keys [span-reqs]
-                                   :or   {span-reqs {:max 5}}}]
+  [client-opts table throughput & {:keys [span-reqs block?]
+                                   :or   {span-reqs {:max 5 :block? false}}}]
 
   (let [{arg-read :read arg-write :write} throughput
         {:keys [status throughput]} (describe-table client-opts table)
@@ -592,12 +592,16 @@
                 (.updateTable client
                               (UpdateTableRequest. table-name
                                                    (make-DynamoDB-parts :provisioned-throughput throughput)))
-                (Tables/waitForTableToBecomeActive client table-name))]
-        (future (loop [[[r w] & series] throughput-series]
+                (Tables/waitForTableToBecomeActive client table-name))
+              (update-repeatedly []
+                (loop [[[r w] & series] throughput-series]
                   (let [result (request-update {:read r :write w})]
                     (if (empty? series)
                       (describe-table client-opts table-name)
-                      (recur series))))))))
+                      (recur series)))))]
+        (if block?
+          (update-repeatedly)
+          (future (update-repeatedly))))))
 
 (defn list-tables "Returns a vector of table names."
   [client-opts]
