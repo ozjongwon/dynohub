@@ -1,7 +1,8 @@
 ;;;;   -*- Mode: clojure; encoding: utf-8; -*-
 ;;
 ;; Copyright (C) 2014 Jong-won Choi
-;; All rights reserved.
+;;
+;; Distributed under the Eclipse Public License, the same as Clojure.
 ;;
 ;;;; Commentary:
 ;;

@@ -1,7 +1,8 @@
 ;;;;   -*- Mode: clojure; encoding: utf-8; -*-
 ;;
 ;; Copyright (C) 2014 Jong-won Choi
-;; All rights reserved.
+;;
+;; Distributed under the Eclipse Public License, the same as Clojure.
 ;;
 ;;;; Commentary:
 ;;
@@ -78,8 +79,8 @@
 (hub-fns->lite-fns [batch-get-item batch-write-item create-table delete-item delete-table describe-table get-item list-tables put-item query scan update-item update-table])
 
 (defn ensure-table "Creates a table iff it doesn't already exist."
-  [client-opts table-name hash-keydef & opts]
-  (when-not (describe-table client-opts table-name)
-    (create-table client-opts table-name hash-keydef opts)))
+  [table-name hash-keydef & opts]
+  (when-not (describe-table table-name)
+    (create-table table-name hash-keydef opts)))
 
 ;;; DYNOLITE.CLJ ends here

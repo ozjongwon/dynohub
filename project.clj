@@ -1,4 +1,15 @@
-(defproject com.ozjongwon/dynohub "1.0.0-RC3"
+;;;;   -*- Mode: clojure; encoding: utf-8; -*-
+;;
+;; Copyright (C) 2014 Jong-won Choi
+;;
+;; Distributed under the Eclipse Public License, the same as Clojure.
+;;
+;;;; Commentary:
+;;
+;;
+;;
+;;;; Code:
+(defproject com.ozjongwon/dynohub "1.0.0-RC4"
   :author "Jong-won Choi"
   :description "Clojure DynamoDB client"
   :url "https://github.com/ozjongwon/dynohub"
@@ -63,3 +74,4 @@
              "-Dsun.io.useCanonCaches=false"]
   :encoding "utf-8"
   )
+;;; PROJECT.CLJ ends here

@@ -1,3 +1,14 @@
+;;;;   -*- Mode: clojure; encoding: utf-8; -*-
+;;
+;; Copyright (C) 2014 Jong-won Choi
+;;
+;; Distributed under the Eclipse Public License, the same as Clojure.
+;;
+;;;; Commentary:
+;;
+;;
+;;
+;;;; Code:
 (ns ozjongwon.dynohub
   "Clojure DynamoDB client. This experimental project started from Faraday by Peter Taoussanis.
   Ref. https://github.com/ptaoussanis/faraday (Faraday),
@@ -821,3 +832,5 @@
        (maphash (fn [[table-name table-req]]
                   [(name table-name) (make-DynamoDB-parts :write-requests table-req)])
                 requests)))))
+
+;;; DYNOHUB.CLJ ends here
