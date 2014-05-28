@@ -9,9 +9,9 @@
 ;;
 ;;
 ;;;; Code:
-(defproject com.ozjongwon/dynohub "1.0.0-RC4"
+(defproject com.ozjongwon/dynohub "1.0.0-RC5"
   :author "Jong-won Choi"
-  :description "Clojure DynamoDB client"
+  :description "Clojure DynamoDB client(/w Clojure 1.6 + aws-java-sdk 1.7.9)"
   :url "https://github.com/ozjongwon/dynohub"
   :license {:name "Eclipse Public License"
             :url  "http://www.eclipse.org/legal/epl-v10.html"
