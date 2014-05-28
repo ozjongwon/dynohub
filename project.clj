@@ -11,19 +11,19 @@
                 *assert* true}
   :dependencies
   [[org.clojure/clojure        "1.6.0"]
-   [com.taoensso/encore        "1.6.0"]
-   [com.taoensso/nippy         "2.6.3"]
    [com.amazonaws/aws-java-sdk "1.7.9" :exclusions [joda-time]]
-   [joda-time                  "2.3"]]
+   ]
 
   :test-paths ["test" "src"]
   :profiles
   {;; :default [:base :system :user :provided :dev]
    :1.6  {:dependencies [[org.clojure/clojure    "1.6.0"]]}
-   :test {:dependencies [;;[expectations           "2.0.6"]
+   :test {:dependencies [[com.taoensso/encore        "1.6.0"]
+                         [com.taoensso/nippy         "2.6.3"]
+                         [clj-time "0.7.0"]
+
                          [org.clojure/test.check "0.5.8"]]
-          :plugins [;;[lein-expectations "0.0.8"]
-                    [lein-autoexpect   "1.2.2"]]}
+          :plugins [[lein-autoexpect   "1.2.2"]]}
    :dev* [:dev {:jvm-opts ^:replace ["-server"]
                 ;; :hooks [cljx.hooks leiningen.cljsbuild] ; cljx
                 }]
