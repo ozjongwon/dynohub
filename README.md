@@ -28,6 +28,10 @@ See Faraday's [Preparing a database](https://github.com/ptaoussanis/faraday#prep
 
 See Faraday's [Connecting](https://github.com/ptaoussanis/faraday#connecting)
 
+### Examples
+
+There are test cases in dynohub/test/dynohub/dynohub.clj
+
 ## License
 
 Copyright &copy; 2014 Jong-won Choi. Distributed under the [Eclipse Public License][], the same as Clojure.
