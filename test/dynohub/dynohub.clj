@@ -13,10 +13,15 @@
             [ozjongwon.dynohub :as dh]
             [ozjongwon.dynolite :as dl]
             [taoensso.nippy.tools   :as nippy-tools]
+            [clj-time.core :as t]
+            [clj-time.coerce :as tc]
             )
-  #_
-  (:import  [com.amazonaws.auth BasicAWSCredentials]
-            [com.amazonaws.internal StaticCredentialsProvider]))
+
+  (:import    java.nio.ByteBuffer
+
+              #_ [com.amazonaws.auth BasicAWSCredentials]
+              #_ [com.amazonaws.internal StaticCredentialsProvider]
+              ))
 
 (defn- clear-all-tables []
   (doseq [t (dl/list-tables)]
@@ -33,6 +38,11 @@
      (doseq [[name# def#] ~table-name-def-map]
        (apply dl/create-table name# def#))
      ~@body))
+
+;; Binary read/write test helpers
+(def ^:private nt-freeze (comp #(ByteBuffer/wrap %) nippy-tools/freeze))
+(def ^:private nt-thaw   (comp nippy-tools/thaw #(.array ^ByteBuffer %)))
+
 
 (deftest basic-table-tests
   (testing "Basic table tests - create, delete, list, update, describe"
@@ -138,10 +148,21 @@
 (deftest binary-reader-writer
   (testing "Binary reader/writer tests with macro [with|without]-binary-reader-writer"
     (let [test-code `(defn foo [] :foo)]
-      (with-test-env [{:code [[:page :n]]}]
+      (with-test-env [{:code-log [[:page :n]]}]
         (testing "Put items without-binary-reader-writer"
           (is (thrown? java.lang.ClassCastException
                        (dl/without-binary-reader-writer []
-                          (dl/put-item :code {:page 10 :code test-code})))))))))
+                          (dl/put-item :code-log {:page 10 :code test-code})))))
+
+        (testing "Put items with default & time"
+          (let [now (t/now)]
+            (dl/put-item :code-log {:page 10 :date (tc/to-date now)})
+            (is (= now  (tc/from-date (:date (dl/get-item :code-log {:page 10})))))))
+
+        (testing "Use nippy's serialization reader/writer"
+          (let [now (t/now)]
+            (dl/with-binary-reader-writer [:writer nt-freeze :reader nt-thaw]
+              (dl/put-item :code-log {:page 10 :date now})
+              (is (= now (:date (dl/get-item :code-log {:page 10})))))))))))
 
 ;;; DYNOHUB.CLJ ends here
