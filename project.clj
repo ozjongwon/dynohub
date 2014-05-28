@@ -1,4 +1,4 @@
-(defproject com.ozjongwon/dynohub "1.0.0-RC1"
+(defproject com.ozjongwon/dynohub "1.0.0-RC2"
   :author "Jong-won Choi"
   :description "Clojure DynamoDB client"
   :url "https://github.com/ozjongwon/dynohub"
