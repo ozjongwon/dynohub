@@ -37,7 +37,7 @@
        (dl/set-default-client-opts ~test-opts))
      (clear-all-tables)
      (doseq [[name# def#] ~table-name-def-map]
-       (apply dl/create-table name# def#))
+       (apply dl/create-table name# def# :block? true))
      ~@body))
 
 ;; Binary read/write test helpers
@@ -53,41 +53,42 @@
         (dl/set-default-client-opts test-opts)
         (is (= test-opts @dl/default-client-opts)))
 
-      (testing "There are no tables after calling 'delete-table'"
-        (clear-all-tables)
-        (is (empty? (dl/list-tables))))
+      (testing "Create a simple table with hash-keydef only"
+        (dl/create-table table1 hash-keydef1 :block? true)
+        (is (table1 (dl/list-tables))))
 
-      (testing "create a simple table with hash-keydef only"
-        (dl/create-table table1 hash-keydef1))
+      (testing "Delete the simple table"
+        (dl/delete-table table1)
+        (is (nil? (table1 (dl/list-tables)))))
 
-    (let [table-description (dl/describe-table table1)]
+      (let [table-description (dl/describe-table table1)]
 
-      (testing "Do all expected keys exist?"
-        (is (=  #{:prim-keys :creation-date :gsindexes :item-count :lsindexes :throughput :name :size :status}
-                (set (keys table-description)))))
+        (testing "Do all expected keys exist?"
+          (is (=  #{:prim-keys :creation-date :gsindexes :item-count :lsindexes :throughput :name :size :status}
+                  (set (keys table-description)))))
 
-      (testing "Check initial throughput"
-        (is (= '(1 1) (map (:throughput table-description) [:read :write]))))
+        (testing "Check initial throughput"
+          (is (= '(1 1) (map (:throughput table-description) [:read :write]))))
 
-      (testing "Update throughput then check it after increasing throughput"
-        (dl/update-table table1 {:write 30 :read 10} :block? true)
-        (is (= '(10 30) (map (:throughput (dl/describe-table table1)) [:read :write]))))
+        (testing "Update throughput then check it after increasing throughput"
+          (dl/update-table table1 {:write 30 :read 10} :block? true)
+          (is (= '(10 30) (map (:throughput (dl/describe-table table1)) [:read :write]))))
 
-      (testing "Decrease throughput"
-        (dl/update-table table1 {:write 3 :read 1} :block? true)
-        (is (= '(1 3)  (map (:throughput (dl/describe-table table1)) [:read :write]))))
+        (testing "Decrease throughput"
+          (dl/update-table table1 {:write 3 :read 1} :block? true)
+          (is (= '(1 3)  (map (:throughput (dl/describe-table table1)) [:read :write]))))
 
-      (testing "Increase throughput to max-req = 5"
-        ;; :read 32 needs 5 requests
-        (dl/update-table table1 {:write 1 :read 32} :block? true)
-        (is (= '(32 1)  (map (:throughput (dl/describe-table table1)) [:read :write]))))
+        (testing "Increase throughput to max-req = 5"
+          ;; :read 32 needs 5 requests
+          (dl/update-table table1 {:write 1 :read 32} :block? true)
+          (is (= '(32 1)  (map (:throughput (dl/describe-table table1)) [:read :write]))))
 
-      (testing "Increase throughput to max-req < 6"
-        ;; :write 64 needs 6 requests
-        (is (thrown-with-msg? java.lang.AssertionError #"Got max-reqs "
-              (dl/update-table table1 {:write 64 :read 1} :block? true))))
+        (testing "Increase throughput to max-req < 6"
+          ;; :write 64 needs 6 requests
+          (is (thrown-with-msg? java.lang.AssertionError #"Got max-reqs "
+                (dl/update-table table1 {:write 64 :read 1} :block? true))))
 
-    ))))
+        ))))
 
 (deftest basic-data-access
   (testing "Basic reading/writing data tests - put, batch-write, get, batch-get, query, scan"
