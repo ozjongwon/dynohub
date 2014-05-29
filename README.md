@@ -4,7 +4,7 @@ Dynohub was forked from Peter Taoussanis' [Faraday](https://github.com/ptaoussan
 
 The most of internal details are same between Dynohub and Faraday, except:
   * Experimental new design to learn low level Clojure programming
-  * Further abstraction layers (dynolite)
+  * Further abstraction layers (Dynolite)
   * Flexible binary data read/write
 
 Most parts of Faraday documentation can be served as Dynohub documentation.
