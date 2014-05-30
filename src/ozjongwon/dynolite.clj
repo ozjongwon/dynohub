@@ -81,6 +81,6 @@
 (defn ensure-table "Creates a table iff it doesn't already exist."
   [table-name hash-keydef & opts]
   (when-not (describe-table table-name)
-    (create-table table-name hash-keydef opts)))
+    (apply create-table table-name hash-keydef opts)))
 
 ;;; DYNOLITE.CLJ ends here
