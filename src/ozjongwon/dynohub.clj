@@ -201,11 +201,19 @@
 ;; "HASH" "RANGE"
 ;; "KEYS_ONLY" "INCLUDE" "ALL"
 ;;
+(def ^:dynamic *special-enums*)
 (defn- DynamoDB-enum-str->keyword ^clojure.lang.Keyword [^String s]
-  (-> s
-      (str/replace "_" "-")
-      (str/lower-case)
-      (keyword)))
+  (if (and (bound? #'*special-enums*)
+           (contains? *special-enums* s))
+    s
+    (-> s
+        (str/replace "_" "-")
+        (str/lower-case)
+        (keyword))))
+
+(defn- keyword->DynamoDB-enum-str ^String [^String k]
+  ;; A speical case which is for 'as it is' string
+  k)
 
 (defn- keyword->DynamoDB-enum-str ^String [^clojure.lang.Keyword k]
   (when k
