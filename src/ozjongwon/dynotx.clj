@@ -130,7 +130,7 @@
 (defn- new-transaction []
   (let [txid (make-txid)]
     {:txid txid :tx-item (insert-and-return-tx-item txid)
-     :fully-applied-requests (atom (sorted-set))}))
+     :fully-applied-requests (sorted-set)}))
 
 #_
 (defn- transaction-item? [item]
@@ -249,17 +249,12 @@
 (defn- verify-locks [tx-item]
   (:requests tx-item)
 
-(defn- add-request-to-transaction [tx-item request redrive? num-lock-acquire-attempts]
+(defn- add-request-to-transaction [tx request redrive? num-lock-acquire-attempts]
   (if redrive?
     (when (not= (get tx-item +state+) +pending+)
       (throw (ex-info "Initial state must be in pending" {:type :assertion-failure :state (get tx-item +state+)})))
     (loop [i num-lock-acquire-attempts tx-item tx-item success false]
-
-
-
-
-    (dotimes [i ]
-      ;; (verify-locks)
+      (verify-locks)
       ))
   (let [item (lock-item tx-item table item true item-lock-acquire-attempts)]
     ;;; FIXME: ...
@@ -267,11 +262,11 @@
     )))
 
 (defn- attempt-to-add-request-to-tx [tx request]
-  (loop [i tx-lock-contention-resolution-attempts tx-item tx-item]
+  (loop [i tx-lock-contention-resolution-attempts tx tx]
     (if (<= i 0)
-      tx-item                           ; return new tx-item
+      tx                                ; return new tx
       (recur (dec i)
-             (add-request-to-transaction tx-item request (> i 0) tx-lock-acquire-attempts))))
+             (add-request-to-transaction tx request (> i 0) tx-lock-acquire-attempts))))
   ;;..............
   )
 
@@ -304,7 +299,7 @@
 
 
 (defmacro with-transaction [[tx] & body]
-  `(let [~tx (new-transaction)]
+  `(let [~tx (atom (new-transaction))]
      ~@body))
 
 (defn delete-tx [tx]
