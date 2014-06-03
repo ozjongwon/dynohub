@@ -54,4 +54,15 @@
 
 (def maphash (comp (partial apply hash-map) mapcat))
 
+(defmacro tx-assert [x & message]
+  `(when-not ~x
+     (throw (ex-info (str "Transaction Assertion failed: " ~@(if message
+                                                               `(~@(interpose " " message) "\n" (pr-str '~x))
+                                                               `((pr-str '~x))))
+                     {}))))
+(defn error
+  ([x] (if (instance? Exception x) (throw x) (error str {})))
+  ([str map] (throw (ex-info str map ))))
+
+
 ;;; UTILS.CLJ ends here
