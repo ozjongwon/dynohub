@@ -61,8 +61,12 @@
                                                                `((pr-str '~x))))
                      {}))))
 (defn error
-  ([x] (if (instance? Exception x) (throw x) (error str {})))
+  ([x] (if (instance? Exception x) (throw x) (error x {})))
   ([str map] (throw (ex-info str map ))))
 
+(defmacro ignore-errors [exp]
+  `(try ~exp
+        (catch Exception _#
+          nil)))
 
 ;;; UTILS.CLJ ends here

@@ -11,6 +11,28 @@
 ;;      * Isolation
 ;;
 ;;
+;; TODO:
+;;      Figure out when ConditionalCheckFailedException occurs
+;;      Define TP's exceptions
+;;      Is Amazon's DynamoDB Transaction library reliable??
+;;      Read TP books and do it from the scratch
+;;
+;;      * Principles of TP
+;;              Chap 4 - persistent queue
+;;              Chap 6 - locking
+;;              Chap 7 - log based recovery algorithm
+;;              Chap 10 - API
+;;              Chap 3 - SW components
+;;
+;;      * Basic terms
+;;              start, commit, abort - TPM does get requests and perform
+;;
+;;      * 2PC between Transaction Manager and Resource Managers - perpare & commit phases
+;;      * Locking rule - two-phase locking = a transaction must obtain all locks before releasing any of them.
+;;                      growing phase then shrinking phase
+;;
+;;
+;;
 ;;;; Code:
 (ns ozjongwon.dynotx
   "Clojure DynamoDB Transaction - idea from https://github.com/awslabs/dynamodb-transactions"
@@ -40,6 +62,7 @@
 ;;;
 ;;; Transaction-Item
 ;;;
+(def ^:dynamic *current-tx*)
 
 ;; constants
 (def ^:private ^:constant item-lock-acquire-attempts 3)
@@ -130,7 +153,7 @@
 (defn- new-transaction []
   (let [txid (make-txid)]
     {:txid txid :tx-item (insert-and-return-tx-item txid)
-     :fully-applied-requests (sorted-set)}))
+     :fully-applied-request-versions (sorted-set)}))
 
 #_
 (defn- transaction-item? [item]
@@ -145,7 +168,7 @@
 (defmethod get-keys :put-item [req]
   (let [item (:item req)]
     (utils/maphash #(do (when-not (contains? item %)
-                          (utils/error "Can't find required key" {:key  %}))
+                          (utils/error "Can't find required key" {:type :application-error :key  %}))
                         [% (% item)])
                    (table-keys (:table req)))))
 
@@ -234,7 +257,7 @@
          (catch ConditionalCheckFailedException _
            (try (let [tx-item (get-tx-item txid)]
                   (when-not (transaction-completed? tx-item)
-                    (utils/error "Expected the transaction to be completed (no item), but there was one."))
+                    (utils/tx-assert "Expected the transaction to be completed (no item), but there was one."))
                   tx-item)
                 (catch RuntimeException e (when (not= (:type e) :transaction-not-found)
                                             (utils/error e))))))))
@@ -321,19 +344,20 @@
 
 (declare add-request-to-transaction)
 (defn- ensure-grabbing-all-locks [tx]
-  (let [fully-applied-requests (:fully-applied-requests @tx)]
+  (let [fully-applied-request-versions (:fully-applied-request-versions @tx)]
     (for [request (:requests @tx)]
-      (when-not (contains? fully-applied-requests (:rid request))
+      ;; request's version keeps increasing when failed to apply
+      (when-not (contains? fully-applied-request-versions (:version request))
         (add-request-to-transaction tx request true item-lock-acquire-attempts)))))
 
-(defn- add-request-to-transaction [tx request redrive? num-lock-acquire-attempts]
+(defn- add-request-to-transaction [tx request fight-for-a-lock? num-lock-acquire-attempts]
   (let [tx-item (:tx-item @tx)]
-    (if redrive?
+    (if fight-for-a-lock?
       (utils/tx-assert (= (get tx-item +state+) +pending+)
-                       "Initial state must be in pending" :state (get tx-item +state+)))
+                       "To fight for a lock, TX must be in pending state" :state (get tx-item +state+))
       (loop [i num-lock-acquire-attempts success false]
         (ensure-grabbing-all-locks tx)
-        ))
+        ))))
 
     (let [item (lock-item tx request true item-lock-acquire-attempts)]
     ;;; FIXME: ...
@@ -341,14 +365,24 @@
                        ))))
 
 (defn- attempt-to-add-request-to-tx [tx request]
-  (loop [i tx-lock-contention-resolution-attempts tx tx]
+  ;;
+  ;; Repeatedly try to add this request to the tx.
+  ;; If it fails because the 'item' of the request is already in a different transaction,
+  ;; tries to rollback the other transaction.
+  ;;
+  (loop [i tx-lock-contention-resolution-attempts last-conflict nil]
     (if (<= i 0)
-      tx                                ; return new tx
-      (recur (dec i)
-
-             (add-request-to-transaction tx request (> i 0) tx-lock-acquire-attempts))))
-  ;;..............
-  )
+      (utils/error last-conflict)
+      (let [[item ex] (try [(add-request-to-transaction tx request (< i tx-lock-contention-resolution-attempts) tx-lock-acquire-attempts) nil]
+                           (catch clojure.lang.ExceptionInfo e
+                             (when (> i 1) ;; avoid unnecessary rollback
+                               (if-let [other-txid (:txid (ex-data e))]
+                                 (utils/ignore-errors (rollback-using-txid other-txid))
+                                 (utils/error e)))
+                             [nil e]))]
+        (if item
+          item
+          (recur (dec i) ex))))))
 
 (defn- validate-special-attributes-exclusion [special-attributes]
   (when (some #(contains? special-attributes %) special-attributes)
@@ -377,10 +411,27 @@
   [(apply dl/ensure-table @tx-table-name [+txid+ :s] opts)
    (apply dl/ensure-table @image-table-name [+image-id+ :s] opts)])
 
-
+#_
 (defmacro with-transaction [[tx] & body]
   `(let [~tx (atom (new-transaction))]
      ~@body))
+
+(defmacro with-transaction
+  ([[] & body]
+    `(let [*current-tx* (atom (new-transaction))]
+       ~@body))
+  ([[tx] & body]
+    `(let [~tx (atom (new-transaction))
+           *current-tx* ~tx]
+       ~@body)))
+
+(defmacro with-transaction [[& tx] & body]
+  (if tx
+    `(let [~@tx (atom (new-transaction))]
+       (binding [*current-tx* ~@tx]
+         ~@body))
+    `(binding [*current-tx* (atom (new-transaction))]
+         ~@body)))
 
 (defn delete-tx [tx]
   )
@@ -391,22 +442,22 @@
 (defn commit-and-delete-tx [tx]
   )
 
-(defn put-item [tx-item table item & {:keys [tx] :as opts}]
+(defn put-item [table item & opts]
   (validate-write-item-arguments item opts)
-  (attempt-to-add-request-to-tx tx {:op :put-item :table table :item item :opts opts}))
+  (attempt-to-add-request-to-tx *current-tx* {:op :put-item :table table :item item :opts opts}))
 
-(defn get-item [tx-item table prim-kvs & {:keys [tx] :as opts}]
+(defn get-item [table prim-kvs & opts]
   (validate-special-attributes-exclusion (:keys prim-kvs))
-  (attempt-to-add-request-to-tx tx {:op :get-item :table table :prim-kvs prim-kvs :opts opts}))
+  (attempt-to-add-request-to-tx *current-tx* {:op :get-item :table table :prim-kvs prim-kvs :opts opts}))
 
-(defn update-item [tx-item table prim-kvs update-map & {:keys [tx] :as opts}]
+(defn update-item [table prim-kvs update-map & opts]
   (validate-write-item-arguments (merge prim-kvs update-map) opts)
-  (attempt-to-add-request-to-tx tx {:op :update-item :table table :prim-kvs prim-kvs
-                                    :update-map update-map :opts opts}))
+  (attempt-to-add-request-to-tx *current-tx* {:op :update-item :table table :prim-kvs prim-kvs
+                                              :update-map update-map :opts opts}))
 
-(defn delete-item [table prim-kvs & {:keys [tx] :as opts}]
+(defn delete-item [table prim-kvs & opts]
   (validate-write-item-arguments prim-kvs opts)
-  (attempt-to-add-request-to-tx tx {:op :delete-item :table table :prim-kvs prim-kvs :opts opts}))
+  (attempt-to-add-request-to-tx *current-tx* {:op :delete-item :table table :prim-kvs prim-kvs :opts opts}))
 
 
 ;;; DYNOTX.CLJ ends here
