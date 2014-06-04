@@ -44,6 +44,7 @@
              ConditionalCheckFailedException]
             [com.amazonaws
              AmazonServiceException]
+            [clojure.lang ExceptionInfo]
             [java.util UUID]))
 
 ;;;
@@ -282,12 +283,16 @@
                   (when-not (transaction-completed? tx-item)
                     (utils/tx-assert "Expected the transaction to be completed (no item), but there was one."))
                   tx-item)
-                (catch RuntimeException e (when (not= (:type e) :transaction-not-found)
+                (catch ExceptionInfo e (when (not= (:type e) :transaction-not-found)
                                             (utils/error e))))))))
+
+(defn- get-requests-from-current-tx
+  ([]   (get-requests-from-current-tx *current-tx*))
+  ([tx] (mapcat (fn [[_ map]] (vals map)) (:requests-map @tx))))
 
 (defn- post-commit-cleanup [tx-item] ;; doCommit
   (let [state (get tx-item +state+)
-        requests (:requests tx-item)]
+        requests (get-requests-from-current-tx)]
     (utils/tx-assert (= state +committed+)
                      "Unexpected state instead of COMMITTED" :state state :tx-item tx-item)
     (for [request requests]
@@ -298,16 +303,14 @@
 
     (finalize-transaction tx-item +committed+)))
 
-(defn- %rollback [tx-item]
-  (utils/tx-assert (= (get tx-item +state+) +rolled-back+) "Transaction state is not ROLLED_BACK" :state (get tx-item +state+) :tx-item tx-item)
-
-  (for [request (:requests tx-item)]
+(defn- post-rollback-cleanup [tx-item]
+  (utils/tx-assert (= (get tx-item +state+) +rolled-back+)
+                   "Transaction state is not ROLLED_BACK" :state (get tx-item +state+) :tx-item tx-item)
+  (doseq [request (get-requests-from-current-tx)]
     (rollback-item-and-release-lock request)
-    (delete-item-image
-  (try (mark-committed-or-rolled-back +rolled-back+)
-       (catch
+    (delete-item-image (:version request)))
 
-  )
+  (finalize-transaction tx-item +rolled-back+))
 
 (defn- rollback-using-txid [txid]
   (let [tx-item (try (mark-committed-or-rolled-back txid +rolled-back+)
@@ -318,14 +321,14 @@
                        (try (get-tx-item txid)
                             ;; After conditional check failure only happens
                             ;; When it's gone!
-                            (catch RuntimeException _ ;; I.e. :transaction-not-found
+                            (catch ExceptionInfo _ ;; I.e. :transaction-not-found
                               (utils/error "Suddenly the transaction completed during ROLLED_BACK!"
                                        {:type :unknown-completed-transaction :txid txid})))))]
     (case (:state tx-item)
       +committed+ (do (when-not (transaction-completed? tx-item) (post-commit-cleanup tx-item))
                       (utils/error "Transaction commited (instead of rolled-back)"
                                {:type :transaction-committed :txid txid}))
-      +rolled-back+ (when-not (transaction-completed? tx-item) (%rollback tx-item))
+      +rolled-back+ (when-not (transaction-completed? tx-item) (post-rollback-cleanup tx-item))
       :else (utils/tx-assert false "Unexpected state in (rollback-tx tx)" :state (get tx-item +state+) :txid txid))
 
     tx-item))
@@ -354,7 +357,7 @@
       (cond (empty? lock-holder) (recur tx request false (dec attempts))
             (= lock-holder txid) db-item
             (> attempts 1) (do (try (rollback-using-txid lock-holder)
-                                    (catch RuntimeException ex
+                                    (catch ExceptionInfo ex
                                       (case (:type (ex-data ex))
                                         :transaction-completed nil
                                         :transaction-not-found (release-read-lock lock-holder table key-map))))
@@ -371,7 +374,7 @@
 (declare add-request-to-transaction)
 (defn- ensure-grabbing-all-locks [tx]
   (let [fully-applied-request-versions (:fully-applied-request-versions @tx)]
-    (for [request (:requests @tx)]
+    (for [request (get-requests-from-current-tx tx)]
       ;; request's version keeps increasing when failed to apply
       (when-not (contains? fully-applied-request-versions (:version request))
         (add-request-to-transaction tx request true item-lock-acquire-attempts)))))
@@ -384,6 +387,16 @@
       (try (dl/put-item @image-table-name (merge item {+image-id+ image-id +txid+ (:txid request)} :expected {+image-id+ false}))
            ;; Already exists! Ignore!
            (catch ConditionalCheckFailedException _)))))
+
+(defn- release-read-lock [table keys txid]
+  (try (dl/update-item table keys {+txid+ [:delete] +date+ [:delete]}
+                       :expected {+txid+ txid +transient+ false +applied+ false})
+       (catch ConditionalCheckFailedException _
+         (try (dl/delete-item table keys :expected {+txid+ txid +transient+ true +applied+ false})
+              (catch ConditionalCheckFailedException _
+                (let [item (dl/get-item table keys :consistent? true)]
+                  (utils/tx-assert (not (and item (= (get item +txid+) txid) (contains? item +applied+)))
+                                   "Item should not have been applied. Unable to release lock item" item)))))))
 
 (defn- add-request-to-transaction [tx request fight-for-a-lock? num-lock-acquire-attempts]
   (let [tx-item (:tx-item @tx)
@@ -405,11 +418,30 @@
                              (utils/error "Attempted to add a request to a transaction that was not in PENDING state "
                                           {:type :transaction-not-in-pending-state :txid txid})))))
                   (recur (dec i)))))))
-    (let [item (lock-item tx @request-atom true item-lock-acquire-attempts)]
-      (save-item-image @request-atom item)
+    ;; When the item locked, save it to the item image
+    (save-item-image @request-atom (lock-item tx @request-atom true item-lock-acquire-attempts))
 
-      (update-tx-table tx-item table item opts-map
-                       ))))
+    (try (let [tx-item (get-tx-item txid)]
+           (case (get tx-item +state+)
+             +committed+        (post-commit-cleanup tx-item)
+             +rolled-back+      (post-rollback-cleanup tx-item)
+             +pending+          nil
+             (urils/error "Unexpected state" {:type :transaction-exception :state  (get tx-item +state+)})))
+         (catch ExceptionInfo e
+           (release-read-lock (:table request) (get-keys request) txid)
+           (utils/error e)))
+
+        // 4. Apply change to item, keeping lock on the item, returning the attributes according to RETURN_VALUE
+        //    If we are a read request, and there is an applied delete request for the same item in the tx, return null.
+        Map<String, AttributeValue> returnItem = applyAndKeepLock(callerRequest, item);
+
+        // 5. Optimization: Keep track of the requests that this transaction object has fully applied
+        if(callerRequest.getRid() != null) {
+            fullyAppliedRequests.add(callerRequest.getRid());
+        }
+
+        return returnItem;
+))
 
 (defn- attempt-to-add-request-to-tx [tx request]
   ;;
