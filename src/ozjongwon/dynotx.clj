@@ -265,13 +265,8 @@
   (try (unlock-item-after-commit-using-op txid req)
        (catch ConditionalCheckFailedException _)))
 
-(defn- tx-item->image-id [tx-item]
-  (let [version (get tx-item +version+)]
-    (utils/tx-assert (> version 0))
-    (str (get tx-item +txid+) "#" version)))
-
-(defn- delete-item-image [tx-item]
-  (dl/delete-item @image-table-name {+image-id+ (tx-item->image-id tx-item)}))
+(defn- delete-item-image [tx-item version]
+  (dl/delete-item @image-table-name {+image-id+ (str (get tx-item +txid+) "#" version)}))
 
 (defn- finalize-transaction [tx-item expected-current-state]
   (utils/tx-assert (contains? #{+committed+ +rolled-back+} expected-current-state))
@@ -286,29 +281,29 @@
                 (catch ExceptionInfo e (when (not= (:type e) :transaction-not-found)
                                             (utils/error e))))))))
 
-(defn- get-requests-from-current-tx
-  ([]   (get-requests-from-current-tx *current-tx*))
+(defn- get-requests-from-tx
+  ([]   (get-requests-from-tx *current-tx*))
   ([tx] (mapcat (fn [[_ map]] (vals map)) (:requests-map @tx))))
 
 (defn- post-commit-cleanup [tx-item] ;; doCommit
   (let [state (get tx-item +state+)
-        requests (get-requests-from-current-tx)]
+        requests (get-requests-from-tx)]
     (utils/tx-assert (= state +committed+)
                      "Unexpected state instead of COMMITTED" :state state :tx-item tx-item)
     (for [request requests]
       (unlock-item-after-commit (:txid tx-item) request))
 
     (for [request requests]
-      (delete-item-image tx-item))
+      (delete-item-image tx-item (:version request)))
 
     (finalize-transaction tx-item +committed+)))
 
 (defn- post-rollback-cleanup [tx-item]
   (utils/tx-assert (= (get tx-item +state+) +rolled-back+)
                    "Transaction state is not ROLLED_BACK" :state (get tx-item +state+) :tx-item tx-item)
-  (doseq [request (get-requests-from-current-tx)]
+  (doseq [request (get-requests-from-tx)]
     (rollback-item-and-release-lock request)
-    (delete-item-image (:version request)))
+    (delete-item-image tx-item (:version request)))
 
   (finalize-transaction tx-item +rolled-back+))
 
@@ -374,7 +369,7 @@
 (declare add-request-to-transaction)
 (defn- ensure-grabbing-all-locks [tx]
   (let [fully-applied-request-versions (:fully-applied-request-versions @tx)]
-    (for [request (get-requests-from-current-tx tx)]
+    (for [request (get-requests-from-tx tx)]
       ;; request's version keeps increasing when failed to apply
       (when-not (contains? fully-applied-request-versions (:version request))
         (add-request-to-transaction tx request true item-lock-acquire-attempts)))))
