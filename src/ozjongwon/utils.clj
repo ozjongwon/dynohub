@@ -69,4 +69,8 @@
         (catch Exception _#
           nil)))
 
+(defn hash-map->list [map]
+  (mapcat identity map))
+  
+
 ;;; UTILS.CLJ ends here

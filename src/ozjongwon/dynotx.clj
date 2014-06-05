@@ -158,24 +158,21 @@
     {:txid txid :tx-item (insert-and-return-tx-item txid)
      :fully-applied-request-versions (sorted-set)}))
 
-#_
-(defn- transaction-item? [item]
-  (contains? item +txid+))
-
 (defn- valid-return-value? [rv]
   (contains? #{:all-old :all-new :none} rv))
 
-(defmulti get-keys (fn [req]
+(defmulti prim-kvs (fn [req]
                      (:op req)))
 
-(defmethod get-keys :put-item [req]
-  (let [item (:item req)]
-    (utils/maphash #(do (when-not (contains? item %)
-                          (utils/error "Can't find required key" {:type :application-error :key  %}))
-                        [% (get item %)])
-                   (table-keys (:table req)))))
+(defmethod prim-kvs :put-item [req]
+  (let [item (:item req)
+        table-keys (table-keys (:table req))
+        kvs  (select-keys item table-keys)]
+    (if (= (count kvs) (count table-keys))
+      kvs
+      (utils/error "Can't find required keys" {:type :application-error :keys (filter #(not (contains? kvs)) table-keys)}))))
 
-(defmethod get-keys :default [req]
+(defmethod prim-kvs :default [req]
   (:prim-kvs req))
 
 (defn- mark-committed-or-rolled-back [txid state & [version]] ;; finish
@@ -198,19 +195,25 @@
     finalized?))
 
 (defn- add-request-map-to-current-tx [tx-item request-atom]
-  (let [kvs (get-keys @request-atom)
+  ;; request-map = {:table1 {prim-k1 v1} ...}
+  (let [kvs (prim-kvs @request-atom)
         {:keys [table op]} @request-atom
         map (or (:requests-map @*current-tx*) {})]
     (let [{existing-op :op} (get-in map [table kvs])]
-      (cond (or (empty? existing-op) (and (= existing-op :get-item) (not= op :get-item)))
+      ;; write op always win
+      ;; only first get op win when more one get op occurs
+      ;; multiple write ops are not allowed
+      (cond (or (empty? existing-op)
+                ;; overwrite
+                (and (= existing-op :get-item) (not= op :get-item)))
             (do
               ;; everything's fine. So update version and requests-map
               (swap! request-atom assoc :version (get tx-item +version+))
-              (swap! *current-tx* assoc-in [:requests-map table kvs] @request-atom)
+              (swap! *current-tx* assoc-in [:requests-map table kvs] @request-atom))
 
-              (and (not= existing-op :get-item) (not= op :get-item))
-              (utils/error "An existing request other than :get-item found!"
-                           {:type :duplicate-request :txid (get tx-item +txid+) :table table :prim-kvs kvs}))))))
+            (and (not= existing-op :get-item) (not= op :get-item))
+            (utils/error "An existing request other than :get-item found!"
+                         {:type :duplicate-request :txid (get tx-item +txid+) :table table :prim-kvs kvs})))))
 
 (defn- add-request-to-tx-item [tx-item request-atom]
   (let [current-version (get tx-item +version+)]
@@ -298,6 +301,7 @@
 
     (finalize-transaction tx-item +committed+)))
 
+(defn- rollback-item-and-release-lock [request])
 (defn- post-rollback-cleanup [tx-item]
   (utils/tx-assert (= (get tx-item +state+) +rolled-back+)
                    "Transaction state is not ROLLED_BACK" :state (get tx-item +state+) :tx-item tx-item)
@@ -333,7 +337,7 @@
 ;;tx request true item-lock-acquire-attempts
 ;;(lock-item tx request true item-lock-acquire-attempts)
 (defn- lock-item [tx request item-expected? attempts]
-  (let [key-map (get-keys request)
+  (let [key-map (prim-kvs request)
         {:keys [table]} request
         txid  (get tx +txid+)]
     (when (<= attempts 0)
@@ -393,6 +397,73 @@
                   (utils/tx-assert (not (and item (= (get item +txid+) txid) (contains? item +applied+)))
                                    "Item should not have been applied. Unable to release lock item" item)))))))
 
+(defn- apply-and-keep-lock [request locked-item]
+  (let [txid            (get locked-item +txid+)
+        expected        {+txid+ txid +applied+ false}
+        table           (:table request)
+        return-all-old? (= (get-in request [:opts :return]) :all-old)
+        request-op      (:op request)]
+    ;; FIXME: return item after below put or update or etc
+    (when-not (contains? locked-item +applied+)
+      (try (case request-op
+             :put-item (apply dl/put-item
+                              table
+                              (merge (assoc (:item request) +applied+ true)
+                                     (select-keys locked-item [+txid+ +date+ +transient+]))
+                              :expected expected
+                              (utils/hash-map->list (:opts request)))
+             :update-item (apply dl/update-item
+                                 table
+                                 (:prim-kvs request)
+                                 (assoc (:update-map request) +applied+ true)
+                                 :expected expected
+                                 (utils/hash-map->list (:opts request)))
+             :delete-item    nil ;; noop
+             :get-item       nil ;; noop
+             )
+           ;; this won't happen!
+           (catch ConditionalCheckFailedException -))) ;; 'Applied' already
+
+    (when-not (and return-all-old?
+                   (contains? locked-item +transient+))
+      (cond (= request-op :get-item)
+            (let [winning-request (get-in (:requests-map @*current-tx*) [table (prim-kvs request)])]
+              (case (op winning-request)
+                :delete-item nil ;; no-op deleted
+                :get-item (when-not (contains? locked-item +transient+)
+                            (when-let [attrs-to-get (get-in request [:opts :attrs])]
+                              ;; FIXME: mutation? another atom?
+                              ;; return new locked-item
+                              (select-keys locked-item attrs-to-get)))
+                locked-item))
+
+            (= request-op :delete-item) (and return-all-old? locked-item)
+
+            ;; put, update + return-all-old?
+            return-all-old?
+
+
+                                              } else if(getRequest.getAttributesToGet() != null) {
+                // Remove attributes that weren't asked for in the request
+                Set<String> attributesToGet = new HashSet<String>(getRequest.getAttributesToGet());
+                Iterator<Map.Entry<String, AttributeValue>> it = lockedItem.entrySet().iterator();
+                while(it.hasNext()) {
+                    Map.Entry<String, AttributeValue> attr = it.next();
+                    if(! attributesToGet.contains(attr.getKey())) {
+                        it.remove(); // TODO does this need to keep the tx attributes?
+                    }
+                }
+            }
+            return lockedItem;
+        }
+
+
+      ;; {:op :get-item :table table :prim-kvs prim-kvs :opts opts}
+
+    :expected {+txid+ (get locked-item +txid+) +applied+ false}
+
+  )
+
 (defn- add-request-to-transaction [tx request fight-for-a-lock? num-lock-acquire-attempts]
   (let [tx-item (:tx-item @tx)
         txid (get tx-item +txid+)
@@ -414,29 +485,27 @@
                                           {:type :transaction-not-in-pending-state :txid txid})))))
                   (recur (dec i)))))))
     ;; When the item locked, save it to the item image
-    (save-item-image @request-atom (lock-item tx @request-atom true item-lock-acquire-attempts))
+    (let [item  (lock-item tx @request-atom true item-lock-acquire-attempts)
+          _     (save-item-image @request-atom (lock-item tx @request-atom true item-lock-acquire-attempts))
+          tx-item (try (get-tx-item txid)
+                       (catch ExceptionInfo e
+                         (release-read-lock (:table request) (prim-kvs request) txid)
+                         (utils/error e)))]
+      (case (get tx-item +state+)
+        +committed+        (do (post-commit-cleanup tx-item)
+                               (utils/error "The transaction already committed"
+                                            {:type :transaction-commited :txid txid}))
+        +rolled-back+      (do (post-rollback-cleanup tx-item)
+                               (utils/error "The transaction already rolled back"
+                                            {:type :transaction-commited :txid txid}))
+        +pending+          nil
+        (utils/error "Unexpected state" {:type :transaction-exception :state (get tx-item +state+)}))
 
-    (try (let [tx-item (get-tx-item txid)]
-           (case (get tx-item +state+)
-             +committed+        (post-commit-cleanup tx-item)
-             +rolled-back+      (post-rollback-cleanup tx-item)
-             +pending+          nil
-             (urils/error "Unexpected state" {:type :transaction-exception :state  (get tx-item +state+)})))
-         (catch ExceptionInfo e
-           (release-read-lock (:table request) (get-keys request) txid)
-           (utils/error e)))
-
-        // 4. Apply change to item, keeping lock on the item, returning the attributes according to RETURN_VALUE
-        //    If we are a read request, and there is an applied delete request for the same item in the tx, return null.
-        Map<String, AttributeValue> returnItem = applyAndKeepLock(callerRequest, item);
-
-        // 5. Optimization: Keep track of the requests that this transaction object has fully applied
-        if(callerRequest.getRid() != null) {
-            fullyAppliedRequests.add(callerRequest.getRid());
-        }
-
-        return returnItem;
-))
+      (let [final-item (apply-and-keep-lock request item)]
+        (when-not (nil? (:version request))
+          ;;fully applied requests add the version
+          )
+        final-item))))
 
 (defn- attempt-to-add-request-to-tx [tx request]
   ;;
@@ -458,10 +527,10 @@
           item
           (recur (dec i) ex))))))
 
-(defn- validate-special-attributes-exclusion [special-attributes]
-  (when (some #(contains? special-attributes %) special-attributes)
+(defn- validate-special-attributes-exclusion [attributes]
+  (when (some #(contains? special-attributes %) attributes)
     (utils/error "Return must not contain any of reserved attributes"
-             {:invalid-attributes (filter #(contains? special-attributes %) special-attributes)})))
+             {:invalid-attributes (filter #(contains? special-attributes %) attributes)})))
 
 (defn- validate-write-item-arguments [key-map opts]
   (when-not (valid-return-value? (:return opts))
@@ -503,21 +572,24 @@
   )
 
 (defn put-item [table item & opts]
-  (validate-write-item-arguments item opts)
-  (attempt-to-add-request-to-tx *current-tx* {:op :put-item :table table :item item :opts opts}))
+  (let [opts (apply hash-map opts)]
+    (validate-write-item-arguments item opts)
+    (attempt-to-add-request-to-tx *current-tx* {:op :put-item :table table :item item :opts opts})))
 
 (defn get-item [table prim-kvs & opts]
   (validate-special-attributes-exclusion (:keys prim-kvs))
-  (attempt-to-add-request-to-tx *current-tx* {:op :get-item :table table :prim-kvs prim-kvs :opts opts}))
+  (attempt-to-add-request-to-tx *current-tx* {:op :get-item :table table :prim-kvs prim-kvs :opts (apply hash-map opts)}))
 
 (defn update-item [table prim-kvs update-map & opts]
-  (validate-write-item-arguments (merge prim-kvs update-map) opts)
-  (attempt-to-add-request-to-tx *current-tx* {:op :update-item :table table :prim-kvs prim-kvs
-                                                    :update-map update-map :opts opts}))
+  (let [opts (apply hash-map opts)]
+    (validate-write-item-arguments (merge prim-kvs update-map) opts)
+    (attempt-to-add-request-to-tx *current-tx* {:op :update-item :table table :prim-kvs prim-kvs
+                                                :update-map update-map :opts opts})))
 
 (defn delete-item [table prim-kvs & opts]
-  (validate-write-item-arguments prim-kvs opts)
-  (attempt-to-add-request-to-tx *current-tx* {:op :delete-item :table table :prim-kvs prim-kvs :opts opts}))
+  (let [opts (apply hash-map opts)]
+    (validate-write-item-arguments prim-kvs opts)
+    (attempt-to-add-request-to-tx *current-tx* {:op :delete-item :table table :prim-kvs prim-kvs :opts opts})))
 
 
 ;;; DYNOTX.CLJ ends here
