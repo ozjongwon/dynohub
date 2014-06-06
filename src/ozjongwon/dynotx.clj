@@ -486,6 +486,9 @@
           (swap! tx assoc :fully-applied-request-versions (conj (:fully-applied-request-versions @tx) (:version request))))
         final-item))))
 
+(defn- strp-special-attributes [item]
+  (apply dissoc item special-attributes))
+
 (defn- attempt-to-add-request-to-tx [tx request]
   ;;
   ;; Repeatedly try to add this request to the tx.
@@ -505,7 +508,7 @@
                              [nil e]))]
         (if ex
           (recur (dec i) ex)
-          item)))))
+          (strp-special-attributes item))))))
 
 (defn- validate-special-attributes-exclusion [attributes]
   (when (some #(contains? special-attributes %) attributes)
