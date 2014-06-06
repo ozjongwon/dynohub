@@ -129,7 +129,7 @@
 ;;; Simple binary reader/writer
 ;;;
 (defn- sexp->byte-buffer ^ByteBuffer [sexp]
-  (-> (binding [*print-dup* true] (pr-str sexp))
+  (-> (pr-str sexp)
       (.getBytes)
       (ByteBuffer/wrap)))
 
