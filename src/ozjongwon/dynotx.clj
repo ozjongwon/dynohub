@@ -508,8 +508,7 @@
 
       (let [final-item (apply-and-keep-lock @request-atom item)]
         (when-not (nil? (:version request))
-          ;;fully applied requests add the version
-          )
+          (swap! tx assoc :fully-applied-request-versions (conj (:fully-applied-request-versions @tx) (:version request))))
         final-item))))
 
 (defn- attempt-to-add-request-to-tx [tx request]
