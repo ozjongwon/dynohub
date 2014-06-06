@@ -428,8 +428,9 @@
     ;; No item for deleted item & repeated get-item on a transient item
     (when-not (or (= locking-request-op :delete-item)
                   (and (= locking-request-op :get-item) transient-item?))
-      (when-let [attrs-to-get (get-in request [:opts :attrs])]
-        (select-keys locked-item attrs-to-get)))))
+      (if-let [attrs-to-get (get-in request [:opts :attrs])]
+        (select-keys locked-item attrs-to-get)
+        locked-item))))
 
 (defn- apply-and-keep-lock [request locked-item]
   (let [return          (get-in request [:opts :return])
@@ -449,23 +450,21 @@
     (if fight-for-a-lock?
       (utils/tx-assert (= (+state+ tx-item) +pending+)
                        "To fight for a lock, TX must be in pending state" :state (+state+ tx-item))
-      (loop [i num-lock-acquire-attempts success? false]
+      (loop [i num-lock-acquire-attempts item nil]
         (cond (<= i 0)
               (utils/error "Unable to add request to transaction - too much contention for the tx record"
                            {:type :transaction-exception :txid txid})
-              success? success?
+              item item
               :else
               (do (ensure-grabbing-all-locks tx)
-                  (let [success? (try (do (add-request-to-tx-item tx-item request-atom) ;; This call ADDS a VERSION to the request
-                                          true)
-                                      (catch ConditionalCheckFailedException _
-                                        ;; TX changed unexpectedly. Check its state
-                                        (let [current-state (get (get-tx-item txid) +state+)]
-                                          (when (not= current-state +pending+)
-                                            (utils/error "Attempted to add a request to a transaction that was not in PENDING state "
-                                                         {:type :transaction-not-in-pending-state :txid txid})))
-                                        false))]
-                      (recur (dec i) success?))))))
+                  (let [item (try (add-request-to-tx-item tx-item request-atom) ;; This call ADDS a VERSION to the request
+                                  (catch ConditionalCheckFailedException _
+                                    ;; TX changed unexpectedly. Check its state
+                                    (let [current-state (get (get-tx-item txid) +state+)]
+                                      (when (not= current-state +pending+)
+                                        (utils/error "Attempted to add a request to a transaction that was not in PENDING state "
+                                                     {:type :transaction-not-in-pending-state :txid txid})))))]
+                    (recur (dec i) item))))))
     ;; When the item locked, save it to the item image
     (let [item  (lock-item txid @request-atom true item-lock-acquire-attempts)
           _     (save-item-image @request-atom item)
@@ -496,16 +495,17 @@
   (loop [i tx-lock-contention-resolution-attempts last-conflict nil]
     (if (<= i 0)
       (utils/error last-conflict)
-      (let [[success? ex] (try (do (add-request-to-transaction tx request (< i tx-lock-contention-resolution-attempts) tx-lock-acquire-attempts)
-                                   [true nil])
+      (let [[item ex] (try [(add-request-to-transaction tx request (< i tx-lock-contention-resolution-attempts) tx-lock-acquire-attempts)
+                            nil]
                            (catch clojure.lang.ExceptionInfo e
                              (when (> i 1) ;; avoid unnecessary rollback
                                (if-let [other-txid (:txid (ex-data e))]
                                  (utils/ignore-errors (rollback-using-txid other-txid))
                                  (utils/error e)))
                              [nil e]))]
-        (when-not success?
-          (recur (dec i) ex))))))
+        (if ex
+          (recur (dec i) ex)
+          item)))))
 
 (defn- validate-special-attributes-exclusion [attributes]
   (when (some #(contains? special-attributes %) attributes)
