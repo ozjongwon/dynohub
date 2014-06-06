@@ -161,8 +161,7 @@
 (defn- valid-return-value? [rv]
   (contains? #{:all-old :all-new :none} rv))
 
-(defmulti prim-kvs (fn [req]
-                     (:op req)))
+(defmulti prim-kvs :op)
 
 (defmethod prim-kvs :put-item [req]
   (let [item (:item req)
@@ -245,27 +244,26 @@
                   (utils/tx-assert (and (not (empty? item)) (= txid (get item +txid+)) (contains? item +applied+))
                                    "Item should not have been applied.  Unable to release lock" :item item)))))))
 
-(defmulti unlock-item-after-commit-using-op (fn [txid req]
-                                              (:op req)))
+(defmulti unlock-item-after-commit-using-op :op)
 
 (defn- %put-or-update-request-unlock [txid req]
   (dl/update-item (:table req) (:prim-kvs req) {+txid+ [:delete] +transient+ [:delete] +applied+ [:delete] +date+ [:delete]}
                   :expected {+txid+ txid}))
 
-(defmethod unlock-item-after-commit-using-op :update-item [txid req]
+(defmethod unlock-item-after-commit-using-op :update-item [req txid]
   (%put-or-update-request-unlock txid req))
 
-(defmethod unlock-item-after-commit-using-op :put-item [txid req]
+(defmethod unlock-item-after-commit-using-op :put-item [req txid]
   (%put-or-update-request-unlock txid req))
 
-(defmethod unlock-item-after-commit-using-op :delete-item [txid req]
+(defmethod unlock-item-after-commit-using-op :delete-item [req txid]
   (dl/delete-item (:table req) (:prim-kvs req) :expected {+txid+ txid}))
 
-(defmethod unlock-item-after-commit-using-op :get-item [txid req]
+(defmethod unlock-item-after-commit-using-op :get-item [req txid]
   (release-read-lock txid (:table req) (:prim-kvs req)))
 
 (defn- unlock-item-after-commit [txid req]
-  (try (unlock-item-after-commit-using-op txid req)
+  (try (unlock-item-after-commit-using-op req txid)
        (catch ConditionalCheckFailedException _)))
 
 (defn- delete-item-image [tx-item version]
@@ -397,72 +395,79 @@
                   (utils/tx-assert (not (and item (= (get item +txid+) txid) (contains? item +applied+)))
                                    "Item should not have been applied. Unable to release lock item" item)))))))
 
+(defmulti apply-request-op :op)
+(defmethod apply-request-op :put-item [request locked-item]
+  (apply dl/put-item
+         (:table request)
+         (merge (assoc (:item request) +applied+ true)
+                (select-keys locked-item [+txid+ +date+ +transient+]))
+         :expected {+txid+ (get locked-item +txid+) +applied+ false}
+         (utils/hash-map->list (:opts request))))
+
+(defmethod apply-request-op :update-item [request locked-item]
+  (apply dl/update-item
+         (:table request)
+         (:prim-kvs request)
+         (assoc (:update-map request) +applied+ true)
+         :expected {+txid+ (get locked-item +txid+) +applied+ false}
+         (utils/hash-map->list (:opts request))))
+
+(defmethod apply-request-op :default [_]
+  ;; noop for delete-item and get-item
+  nil)
+
+(defn- load-item-image [version]
+  (dissoc (dl/get-item @image-table-name {+image-id+ (str (get *current-tx* +txid+) "#" version)} :consistent? true)
+          +image-id+))
+
+(defn- compute-item-put-or-update [request applied-item locked-item return]
+  (case return
+    :all-old (or applied-item
+                 (load-item-image (:version request))
+                 (utils/error "Transaction must have completed since the old copy of the image is missing"
+                              {:type :unknown-completed-transaction :txid (get locked-item +txid+)}))
+    :all-new (or applied-item
+                 (let [applied-item (dl/get-item (:table request) (prim-kvs request))]
+                   (if applied-item
+                     (if (= (get locked-item +txid+) (get applied-item +txid+))
+                       applied-item
+                       (utils/error "Transaction IDs mismatched"
+                                    {:type :item-not-locked :table (:table request) :expected locked-item :get applied-item}))
+                     (utils/error "Transaction must have completed since the item no longer exists"
+                                  {:type :unknown-completed-transaction :txid (get locked-item +txid+)}))))
+    nil))
+
+(defmulti item-with-proper-return-value :op)
+
+(defmethod item-with-proper-return-value :put-item [request applied-item locked-item _ return]
+  (compute-item-put-or-update request applied-item locked-item return))
+
+(defmethod item-with-proper-return-value :update-item [request applied-item locked-item _ return]
+  (compute-item-put-or-update request applied-item locked-item return))
+
+(defmethod item-with-proper-return-value :delete-item [_ _ locked-item _ return]
+  ;; Assume it is not transient
+  (when (= return :all-old)
+    locked-item))
+
+(defmethod item-with-proper-return-value :get-item [request _ locked-item transient-item? _]
+  (let [locking-request-op (get-in (:requests-map @*current-tx*) [(:table request) (prim-kvs request :op)])]
+    ;; No item for deleted item & repeated get-item on a transient item
+    (when-not (or (= locking-request-op :delete-item)
+                  (and (= locking-request-op :get-item) transient-item?))
+      (when-let [attrs-to-get (get-in request [:opts :attrs])]
+        (select-keys locked-item attrs-to-get)))))
+
 (defn- apply-and-keep-lock [request locked-item]
-  (let [txid            (get locked-item +txid+)
-        expected        {+txid+ txid +applied+ false}
-        table           (:table request)
-        return-all-old? (= (get-in request [:opts :return]) :all-old)
-        request-op      (:op request)]
-    ;; FIXME: return item after below put or update or etc
-    (when-not (contains? locked-item +applied+)
-      (try (case request-op
-             :put-item (apply dl/put-item
-                              table
-                              (merge (assoc (:item request) +applied+ true)
-                                     (select-keys locked-item [+txid+ +date+ +transient+]))
-                              :expected expected
-                              (utils/hash-map->list (:opts request)))
-             :update-item (apply dl/update-item
-                                 table
-                                 (:prim-kvs request)
-                                 (assoc (:update-map request) +applied+ true)
-                                 :expected expected
-                                 (utils/hash-map->list (:opts request)))
-             :delete-item    nil ;; noop
-             :get-item       nil ;; noop
-             )
-           ;; this won't happen!
-           (catch ConditionalCheckFailedException -))) ;; 'Applied' already
-
-    (when-not (and return-all-old?
-                   (contains? locked-item +transient+))
-      (cond (= request-op :get-item)
-            (let [winning-request (get-in (:requests-map @*current-tx*) [table (prim-kvs request)])]
-              (case (op winning-request)
-                :delete-item nil ;; no-op deleted
-                :get-item (when-not (contains? locked-item +transient+)
-                            (when-let [attrs-to-get (get-in request [:opts :attrs])]
-                              ;; FIXME: mutation? another atom?
-                              ;; return new locked-item
-                              (select-keys locked-item attrs-to-get)))
-                locked-item))
-
-            (= request-op :delete-item) (and return-all-old? locked-item)
-
-            ;; put, update + return-all-old?
-            return-all-old?
-
-
-                                              } else if(getRequest.getAttributesToGet() != null) {
-                // Remove attributes that weren't asked for in the request
-                Set<String> attributesToGet = new HashSet<String>(getRequest.getAttributesToGet());
-                Iterator<Map.Entry<String, AttributeValue>> it = lockedItem.entrySet().iterator();
-                while(it.hasNext()) {
-                    Map.Entry<String, AttributeValue> attr = it.next();
-                    if(! attributesToGet.contains(attr.getKey())) {
-                        it.remove(); // TODO does this need to keep the tx attributes?
-                    }
-                }
-            }
-            return lockedItem;
-        }
-
-
-      ;; {:op :get-item :table table :prim-kvs prim-kvs :opts opts}
-
-    :expected {+txid+ (get locked-item +txid+) +applied+ false}
-
-  )
+  (let [return          (get-in request [:opts :return])
+        transient-item? (contains? locked-item +transient+)]
+    (let [applied-item (when-not (contains? locked-item +applied+) ; not applied yet, apply!
+                         (try (apply-request-op request locked-item)
+                              ;; this won't happen! - 'Applied' already
+                              (catch ConditionalCheckFailedException _)))]
+      ;; No item for transient + :all-old
+      (when-not (and (= return :all-old) transient-item?)
+        (item-with-proper-return-value request applied-item locked-item transient-item? return)))))
 
 (defn- add-request-to-transaction [tx request fight-for-a-lock? num-lock-acquire-attempts]
   (let [tx-item (:tx-item @tx)
@@ -486,7 +491,7 @@
                   (recur (dec i)))))))
     ;; When the item locked, save it to the item image
     (let [item  (lock-item tx @request-atom true item-lock-acquire-attempts)
-          _     (save-item-image @request-atom (lock-item tx @request-atom true item-lock-acquire-attempts))
+          _     (save-item-image @request-atom item)
           tx-item (try (get-tx-item txid)
                        (catch ExceptionInfo e
                          (release-read-lock (:table request) (prim-kvs request) txid)
@@ -501,7 +506,7 @@
         +pending+          nil
         (utils/error "Unexpected state" {:type :transaction-exception :state (get tx-item +state+)}))
 
-      (let [final-item (apply-and-keep-lock request item)]
+      (let [final-item (apply-and-keep-lock @request-atom item)]
         (when-not (nil? (:version request))
           ;;fully applied requests add the version
           )
