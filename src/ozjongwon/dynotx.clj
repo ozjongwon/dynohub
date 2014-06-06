@@ -136,7 +136,7 @@
      :fully-applied-request-versions (sorted-set)}))
 
 (defn- valid-return-value? [rv]
-  (or (empty? rv) (contains? #{:all-old :all-new :none} rv)))
+  (or (nil? rv) (contains? #{:all-old :all-new :none} rv)))
 
 (defmulti prim-kvs :op)
 
@@ -179,7 +179,7 @@
       ;; write op always win
       ;; only first get op win when more one get op occurs
       ;; multiple write ops are not allowed
-      (cond (or (empty? existing-op)
+      (cond (or (nil? existing-op)
                 ;; overwrite
                 (and (= existing-op :get-item) (not= op :get-item)))
             (do
@@ -513,18 +513,17 @@
              {:invalid-attributes (filter #(contains? special-attributes %) attributes)})))
 
 (defn- validate-write-item-arguments [key-map opts]
-  (when-not (valid-return-value? (:return opts))
-    (utils/error "Return value has to be one :all-old, :all-new, and :none"
-             {:type :invalid-request :return (:return opts)}))
-
-  (validate-special-attributes-exclusion (keys key-map))
-  ;; FIXME: dynohub does not support some option args
-  ;;            (:return-icm is not in dynohub code)
-  ;;            Revise dynohub!
-  (doseq [op [:return-cc? :return-icm :expected]]
-    (when (op opts)
-      (utils/error "Not supported option" {:type :invalid-request :invalid-option op})))
-  )
+  (when opts
+    (when-not (valid-return-value? (:return opts))
+      (utils/error "Return value has to be one :all-old, :all-new, and :none"
+                   {:type :invalid-request :return (:return opts)}))
+    ;; FIXME: dynohub does not support some option args
+    ;;            (:return-icm is not in dynohub code)
+    ;;            Revise dynohub!
+    (let [invalid-opts (select-keys opts [:return-cc? :return-icm :expected])]
+      (when-not (empty? invalid-opts)
+        (utils/error "Not supported options" {:type :invalid-request :invalid-options (keys invalid-opts)}))))
+  (validate-special-attributes-exclusion (keys key-map)))
 
 ;;;
 ;;; Public API
@@ -551,27 +550,24 @@
 (defn commit-and-delete-tx [tx]
   )
 
-(defn put-item [table item & opts]
-  ;; FIXME: remove empty 'opts'
-  (let [opts (apply hash-map opts)]
-    (validate-write-item-arguments item opts)
-    (attempt-to-add-request-to-tx *current-tx* {:op :put-item :table table :item item :opts opts})))
-
 (defn get-item [table prim-kvs & opts]
   (validate-special-attributes-exclusion (:keys prim-kvs))
-  (attempt-to-add-request-to-tx *current-tx* {:op :get-item :table table :prim-kvs prim-kvs :opts (apply hash-map opts)}))
+  (attempt-to-add-request-to-tx *current-tx* (cond-> {:op :get-item :table table :prim-kvs prim-kvs}
+                                                     opts (assoc :opts (apply hash-map opts)))))
+
+(defn mutate-item [tx attributes request opts]
+  (let [opts (when opts (apply hash-map opts))]
+    (validate-write-item-arguments attributes opts)
+    (attempt-to-add-request-to-tx tx (cond-> request
+                                             opts (assoc :opts opts)))))
+(defn put-item [table item & opts]
+  (mutate-item *current-tx* item {:op :put-item :table table :item item :opts opts} opts))
 
 (defn update-item [table prim-kvs update-map & opts]
-  (let [opts (apply hash-map opts)]
-    (validate-write-item-arguments (merge prim-kvs update-map) opts)
-    (attempt-to-add-request-to-tx *current-tx* {:op :update-item :table table :prim-kvs prim-kvs
-                                                :update-map update-map :opts opts})))
+  (mutate-item *current-tx* (merge prim-kvs update-map) {:op :update-item :table table :prim-kvs prim-kvs :update-map update-map} opts))
 
 (defn delete-item [table prim-kvs & opts]
-  (let [opts (apply hash-map opts)]
-    (validate-write-item-arguments prim-kvs opts)
-    (attempt-to-add-request-to-tx *current-tx* {:op :delete-item :table table :prim-kvs prim-kvs :opts opts})))
-
+  (mutate-item *current-tx* prim-kvs {:op :delete-item :table table :prim-kvs prim-kvs :opts opts} opts))
 
 ;;; DYNOTX.CLJ ends here
 
