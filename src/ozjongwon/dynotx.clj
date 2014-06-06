@@ -62,6 +62,14 @@
 
 (defonce table-keys (utils/bounded-memoize %table-keys 64))
 
+;; Internal table names and setters
+(def ^:private tx-table-name (atom "_tx_table_"))
+(def ^:private image-table-name (atom "_image_table_"))
+(defn- set-tx-table-name [name]
+  (reset! tx-table-name name))
+(defn- set-image-table-name [name]
+  (reset! image-table-name name))
+
 ;;;
 ;;; Transaction-Item
 ;;;
@@ -91,15 +99,10 @@
 (def ^:private ^:constant +date+   "indicating approximately when the item was locked."
  "_TxD")
 
-
-
-;; (def ^:private ^:constant +pending+ "P")
-;; (def ^:private ^:constant +committed+ "C")
-;; (def ^:private ^:constant +rolled-back+ "R")
-
-;; (def ^:private ^:constant +uncommitted+ "U")
-;; (def ^:private ^:constant +uncommitted+ "U")
-
+;; State
+(def ^:private ^:constant +pending+ "P")
+(def ^:private ^:constant +committed+ "C")
+(def ^:private ^:constant +rolled-back+ "R")
 
     ;; public enum State {
     ;;     PENDING,
@@ -144,14 +147,6 @@
 ;;;
 ;;; Transaction
 ;;;
-
-;; Internal table names and setters
-(def ^:private tx-table-name (atom "_tx_table_"))
-(def ^:private image-table-name (atom "_image_table_"))
-(defn- set-tx-table-name [name]
-  (reset! tx-table-name name))
-(defn- set-image-table-name [name]
-  (reset! image-table-name name))
 
 (defn- new-transaction []
   (let [txid (make-txid)]
