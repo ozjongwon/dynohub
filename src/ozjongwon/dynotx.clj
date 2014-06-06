@@ -12,25 +12,7 @@
 ;;
 ;;
 ;; TODO:
-;;      Figure out when ConditionalCheckFailedException occurs
-;;      Define TP's exceptions
 ;;      Is Amazon's DynamoDB Transaction library reliable??
-;;      Read TP books and do it from the scratch
-;;
-;;      * Principles of TP
-;;              Chap 4 - persistent queue
-;;              Chap 6 - locking
-;;              Chap 7 - log based recovery algorithm
-;;              Chap 10 - API
-;;              Chap 3 - SW components
-;;
-;;      * Basic terms
-;;              start, commit, abort - TPM does get requests and perform
-;;
-;;      * 2PC between Transaction Manager and Resource Managers - perpare & commit phases
-;;      * Locking rule - two-phase locking = a transaction must obtain all locks before releasing any of them.
-;;                      growing phase then shrinking phase
-;;
 ;;
 ;;
 ;;;; Code:
