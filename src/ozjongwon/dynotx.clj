@@ -170,7 +170,7 @@
   (:prim-kvs req))
 
 (defn- mark-committed-or-rolled-back [txid state & [version]] ;; finish
-  (utils/tx-assert (contains? #{+committed+ +rolled-back+} state) "Unexpected state" state :txid txid)
+  (utils/tx-assert (contains? #{+committed+ +rolled-back+} state) "Unexpected state(mark-committed-or-rolled-back)" state :txid txid)
   (let [result (dl/update-item @tx-table-name {+txid+ txid}
                                {+state+ [:put state] +date+ [:put (get-current-time)]}
                                :return :all-new
@@ -224,7 +224,6 @@
            (add-request-map-to-current-tx tx-item request-atom) ;; yes this uses current-version
            ;; update *current-tx* as well
            (swap! *current-tx* assoc :tx-item new-tx-item)
-           (println tx-item new-tx-item)
            (utils/tx-assert (= new-version (inc current-version)) "Unexpected version number from update result")
            new-tx-item)
          (catch AmazonServiceException e
@@ -322,14 +321,13 @@
                       (utils/error "Transaction commited (instead of rolled-back)"
                                {:type :transaction-committed :txid txid}))
       +rolled-back+ (when-not (transaction-completed? tx-item) (post-rollback-cleanup tx-item))
-      :else (utils/tx-assert false "Unexpected state in (rollback-tx tx)" :state (get tx-item +state+) :txid txid))
+      (utils/tx-assert false "Unexpected state in (rollback-tx tx)" :state (get tx-item +state+) :txid txid))
 
     tx-item))
 
 (defn- lock-item [txid request item-expected? attempts]
   (let [key-map (prim-kvs request)
         {:keys [table]} request]
-    (println ">>>" txid)
     (when (<= attempts 0)
       (utils/error "Unable to acquire item lock" {:type :transaction-exception :keys key-map}))
     (let [expected (cond-> {+txid+ false}
@@ -349,7 +347,8 @@
                                     (catch ExceptionInfo ex
                                       (case (:type (ex-data ex))
                                         :transaction-completed nil
-                                        :transaction-not-found (release-read-lock lock-holder table key-map))))
+                                        :transaction-not-found (release-read-lock lock-holder table key-map)
+                                        (utils/error ex))))
                                ;; FIXME: check false??
                                ;; i.e., above rollback or release-read-lock
                                ;; successfully delete the item,
@@ -404,7 +403,7 @@
          :expected {+txid+ (get locked-item +txid+) +applied+ false}
          (utils/hash-map->list (:opts request))))
 
-(defmethod apply-request-op :default [_]
+(defmethod apply-request-op :default [_ _]
   ;; noop for delete-item and get-item
   nil)
 
@@ -488,7 +487,7 @@
                        (catch ExceptionInfo e
                          (release-read-lock (:table request) (prim-kvs request) txid)
                          (utils/error e)))]
-      (case (get tx-item +state+)
+      (condp = (get tx-item +state+)
         +committed+        (do (post-commit-cleanup tx-item)
                                (utils/error "The transaction already committed"
                                             {:type :transaction-commited :txid txid}))
@@ -496,8 +495,7 @@
                                (utils/error "The transaction already rolled back"
                                             {:type :transaction-commited :txid txid}))
         +pending+          nil
-        (utils/error "Unexpected state" {:type :transaction-exception :state (get tx-item +state+)}))
-
+        (utils/error "Unexpected state(add-request-to-tx-item)" {:type :transaction-exception :state (get tx-item +state+)}))
       (let [final-item (apply-and-keep-lock @request-atom item)]
         (when-not (nil? (:version request))
           (swap! tx assoc :fully-applied-request-versions (conj (:fully-applied-request-versions @tx) (:version request))))
