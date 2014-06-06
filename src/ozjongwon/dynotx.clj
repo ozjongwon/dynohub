@@ -363,7 +363,6 @@
 (defn- ensure-grabbing-all-locks [tx]
   (let [fully-applied-request-versions (:fully-applied-request-versions @tx)]
     (for [request (get-requests-from-tx tx)]
-      ;; request's version keeps increasing when failed to apply
       (when-not (contains? fully-applied-request-versions (:version request))
         (add-request-to-transaction tx request true item-lock-acquire-attempts)))))
 
@@ -428,7 +427,8 @@
                                   {:type :unknown-completed-transaction :txid (get locked-item +txid+)}))))
     nil))
 
-(defmulti item-with-proper-return-value :op)
+(defmulti item-with-proper-return-value (fn [r _ _ _ _]
+                                          (:op r)))
 
 (defmethod item-with-proper-return-value :put-item [request applied-item locked-item _ return]
   (compute-item-put-or-update request applied-item locked-item return))
@@ -442,7 +442,7 @@
     locked-item))
 
 (defmethod item-with-proper-return-value :get-item [request _ locked-item transient-item? _]
-  (let [locking-request-op (get-in (:requests-map @*current-tx*) [(:table request) (prim-kvs request :op)])]
+  (let [locking-request-op (get-in (:requests-map @*current-tx*) [(:table request) (prim-kvs request)])]
     ;; No item for deleted item & repeated get-item on a transient item
     (when-not (or (= locking-request-op :delete-item)
                   (and (= locking-request-op :get-item) transient-item?))
@@ -467,19 +467,23 @@
     (if fight-for-a-lock?
       (utils/tx-assert (= (get tx-item +state+) +pending+)
                        "To fight for a lock, TX must be in pending state" :state (get tx-item +state+))
-      (loop [i num-lock-acquire-attempts]
-        (if (<= i 0)
-          (utils/error "Unable to add request to transaction - too much contention for the tx record"
-                       {:type :transaction-exception :txid txid})
-          (do (ensure-grabbing-all-locks tx)
-              (or (try (add-request-to-tx-item tx-item request-atom) ;; This call ADDS a VERSION to the request
-                       (catch ConditionalCheckFailedException _
-                         ;; TX changed unexpectedly. Check its state
-                         (let [current-state (get (get-tx-item txid) +state+)]
-                           (when (not= current-state +pending+)
-                             (utils/error "Attempted to add a request to a transaction that was not in PENDING state "
-                                          {:type :transaction-not-in-pending-state :txid txid})))))
-                  (recur (dec i)))))))
+      (loop [i num-lock-acquire-attempts success? false]
+        (cond (<= i 0)
+              (utils/error "Unable to add request to transaction - too much contention for the tx record"
+                           {:type :transaction-exception :txid txid})
+              success? success?
+              :else
+              (do (ensure-grabbing-all-locks tx)
+                  (let [success? (try (do (add-request-to-tx-item tx-item request-atom) ;; This call ADDS a VERSION to the request
+                                          true)
+                                      (catch ConditionalCheckFailedException _
+                                        ;; TX changed unexpectedly. Check its state
+                                        (let [current-state (get (get-tx-item txid) +state+)]
+                                          (when (not= current-state +pending+)
+                                            (utils/error "Attempted to add a request to a transaction that was not in PENDING state "
+                                                         {:type :transaction-not-in-pending-state :txid txid})))
+                                        false))]
+                      (recur (dec i) success?))))))
     ;; When the item locked, save it to the item image
     (let [item  (lock-item txid @request-atom true item-lock-acquire-attempts)
           _     (save-item-image @request-atom item)
@@ -510,15 +514,15 @@
   (loop [i tx-lock-contention-resolution-attempts last-conflict nil]
     (if (<= i 0)
       (utils/error last-conflict)
-      (let [[item ex] (try [(add-request-to-transaction tx request (< i tx-lock-contention-resolution-attempts) tx-lock-acquire-attempts) nil]
+      (let [[success? ex] (try (do (add-request-to-transaction tx request (< i tx-lock-contention-resolution-attempts) tx-lock-acquire-attempts)
+                                   [true nil])
                            (catch clojure.lang.ExceptionInfo e
                              (when (> i 1) ;; avoid unnecessary rollback
                                (if-let [other-txid (:txid (ex-data e))]
                                  (utils/ignore-errors (rollback-using-txid other-txid))
                                  (utils/error e)))
                              [nil e]))]
-        (if item
-          item
+        (when-not success?
           (recur (dec i) ex))))))
 
 (defn- validate-special-attributes-exclusion [attributes]
@@ -566,6 +570,7 @@
   )
 
 (defn put-item [table item & opts]
+  ;; FIXME: remove empty 'opts'
   (let [opts (apply hash-map opts)]
     (validate-write-item-arguments item opts)
     (attempt-to-add-request-to-tx *current-tx* {:op :put-item :table table :item item :opts opts})))
