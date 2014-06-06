@@ -154,7 +154,7 @@
      :fully-applied-request-versions (sorted-set)}))
 
 (defn- valid-return-value? [rv]
-  (contains? #{:all-old :all-new :none} rv))
+  (or (empty? rv) (contains? #{:all-old :all-new :none} rv)))
 
 (defmulti prim-kvs :op)
 
