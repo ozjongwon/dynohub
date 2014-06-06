@@ -164,8 +164,8 @@
 
 (defn- transaction-completed? [tx-item]
   (utils/tx-assert (contains? tx-item +finalized+))
-  (let [finalized? (get tx-item +finalized+)
-        state (get tx-item +state+)]
+  (let [finalized? (+finalized+ tx-item)
+        state (+state+ tx-item)]
     (utils/tx-assert (and finalized? (contains? #{+committed+ +rolled-back+} state))
                      "Unexpected terminal state for completed tx" :state state :tx-item tx-item)
     finalized?))
@@ -184,17 +184,17 @@
                 (and (= existing-op :get-item) (not= op :get-item)))
             (do
               ;; everything's fine. So update version and requests-map
-              (swap! request-atom assoc :version (get tx-item +version+))
+              (swap! request-atom assoc :version (+version+ tx-item))
               (swap! *current-tx* assoc-in [:requests-map table kvs] @request-atom))
 
             (and (not= existing-op :get-item) (not= op :get-item))
             (utils/error "An existing request other than :get-item found!"
-                         {:type :duplicate-request :txid (get tx-item +txid+) :table table :prim-kvs kvs})))))
+                         {:type :duplicate-request :txid (+txid+ tx-item) :table table :prim-kvs kvs})))))
 
 (defn- add-request-to-tx-item [tx-item request-atom]
-  (let [current-version (get tx-item +version+)]
+  (let [current-version (+version+ tx-item)]
     (try (let [new-tx-item (dl/update-item @tx-table-name
-                                         {+txid+ (get tx-item +txid+)}
+                                         {+txid+ (+txid+ tx-item)}
                                          {+requests+   [:add #{@request-atom}]
                                           +version+    [:add 1]
                                           +date+       [:put (get-current-time)]}
@@ -244,11 +244,11 @@
        (catch ConditionalCheckFailedException _)))
 
 (defn- delete-item-image [tx-item version]
-  (dl/delete-item @image-table-name {+image-id+ (str (get tx-item +txid+) "#" version)}))
+  (dl/delete-item @image-table-name {+image-id+ (str (+txid+ tx-item) "#" version)}))
 
 (defn- finalize-transaction [tx-item expected-current-state]
   (utils/tx-assert (contains? #{+committed+ +rolled-back+} expected-current-state))
-  (let [txid (get tx-item +txid+)]
+  (let [txid (+txid+ tx-item)]
     (try (dl/update-item @tx-table-name {+txid+ txid} {+finalized+ [:put true] +date+ [:put (get-current-time)]}
                          :expected {+state+ expected-current-state})
          (catch ConditionalCheckFailedException _
@@ -264,7 +264,7 @@
   ([tx] (mapcat (fn [[_ map]] (vals map)) (:requests-map @tx))))
 
 (defn- post-commit-cleanup [tx-item] ;; doCommit
-  (let [state (get tx-item +state+)
+  (let [state (+state+ tx-item)
         requests (get-requests-from-tx)]
     (utils/tx-assert (= state +committed+)
                      "Unexpected state instead of COMMITTED" :state state :tx-item tx-item)
@@ -278,8 +278,8 @@
 
 (defn- rollback-item-and-release-lock [request])
 (defn- post-rollback-cleanup [tx-item]
-  (utils/tx-assert (= (get tx-item +state+) +rolled-back+)
-                   "Transaction state is not ROLLED_BACK" :state (get tx-item +state+) :tx-item tx-item)
+  (utils/tx-assert (= (+state+ tx-item) +rolled-back+)
+                   "Transaction state is not ROLLED_BACK" :state (+state+ tx-item) :tx-item tx-item)
   (doseq [request (get-requests-from-tx)]
     (rollback-item-and-release-lock request)
     (delete-item-image tx-item (:version request)))
@@ -303,7 +303,7 @@
                       (utils/error "Transaction commited (instead of rolled-back)"
                                {:type :transaction-committed :txid txid}))
       +rolled-back+ (when-not (transaction-completed? tx-item) (post-rollback-cleanup tx-item))
-      (utils/tx-assert false "Unexpected state in (rollback-tx tx)" :state (get tx-item +state+) :txid txid))
+      (utils/tx-assert false "Unexpected state in (rollback-tx tx)" :state (+state+ tx-item) :txid txid))
 
     tx-item))
 
@@ -444,11 +444,11 @@
 
 (defn- add-request-to-transaction [tx request fight-for-a-lock? num-lock-acquire-attempts]
   (let [tx-item (:tx-item @tx)
-        txid (get tx-item +txid+)
+        txid (+txid+ tx-item)
         request-atom (atom request)]
     (if fight-for-a-lock?
-      (utils/tx-assert (= (get tx-item +state+) +pending+)
-                       "To fight for a lock, TX must be in pending state" :state (get tx-item +state+))
+      (utils/tx-assert (= (+state+ tx-item) +pending+)
+                       "To fight for a lock, TX must be in pending state" :state (+state+ tx-item))
       (loop [i num-lock-acquire-attempts success? false]
         (cond (<= i 0)
               (utils/error "Unable to add request to transaction - too much contention for the tx record"
@@ -473,7 +473,7 @@
                        (catch ExceptionInfo e
                          (release-read-lock (:table request) (prim-kvs request) txid)
                          (utils/error e)))]
-      (condp = (get tx-item +state+)
+      (condp = (+state+ tx-item)
         +committed+        (do (post-commit-cleanup tx-item)
                                (utils/error "The transaction already committed"
                                             {:type :transaction-commited :txid txid}))
@@ -481,7 +481,7 @@
                                (utils/error "The transaction already rolled back"
                                             {:type :transaction-commited :txid txid}))
         +pending+          nil
-        (utils/error "Unexpected state(add-request-to-tx-item)" {:type :transaction-exception :state (get tx-item +state+)}))
+        (utils/error "Unexpected state(add-request-to-tx-item)" {:type :transaction-exception :state (+state+ tx-item)}))
       (let [final-item (apply-and-keep-lock @request-atom item)]
         (when-not (nil? (:version request))
           (swap! tx assoc :fully-applied-request-versions (conj (:fully-applied-request-versions @tx) (:version request))))
