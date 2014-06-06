@@ -398,7 +398,7 @@
   (apply dl/update-item
          (:table request)
          (:prim-kvs request)
-         (assoc (:update-map request) +applied+ true)
+         (assoc (:update-map request) +applied+ [:put true])
          :expected {+txid+ (get locked-item +txid+) +applied+ false}
          (utils/hash-map->list (:opts request))))
 
