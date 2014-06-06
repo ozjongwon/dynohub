@@ -170,7 +170,7 @@
   (:prim-kvs req))
 
 (defn- mark-committed-or-rolled-back [txid state & [version]] ;; finish
-  (utils/tx-assert (contains? #{+committed+ +rolled-back+} state) "Unexpected state(mark-committed-or-rolled-back)" state :txid txid)
+  (utils/tx-assert (contains? #{+committed+ +rolled-back+} state) "Unexpected state in (mark-committed-or-rolled-back)" state :txid txid)
   (let [result (dl/update-item @tx-table-name {+txid+ txid}
                                {+state+ [:put state] +date+ [:put (get-current-time)]}
                                :return :all-new
@@ -316,7 +316,7 @@
                             (catch ExceptionInfo _ ;; I.e. :transaction-not-found
                               (utils/error "Suddenly the transaction completed during ROLLED_BACK!"
                                        {:type :unknown-completed-transaction :txid txid})))))]
-    (case (:state tx-item)
+    (condp = (+state+ tx-item)
       +committed+ (do (when-not (transaction-completed? tx-item) (post-commit-cleanup tx-item))
                       (utils/error "Transaction commited (instead of rolled-back)"
                                {:type :transaction-committed :txid txid}))
