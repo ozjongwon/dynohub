@@ -90,7 +90,7 @@
   :_TxR)
 (def ^:private ^:constant +version+ "a version number storing for detecting concurrent changes to a TX record."
   :_TxV)
-(def ^:private ^:constant +finalized+ :_Tx)
+(def ^:private ^:constant +finalized+ :_TxF)
 (def ^:private ^:constant +image-id+ :_TxI)
 (def ^:private ^:constant +applied+ "indicating whether the transaction has performed the write to the item yet."
   :_TxA)
