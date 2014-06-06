@@ -83,21 +83,21 @@
 
 ;; As in Amazon's code & doc
 (def ^:private ^:constant +txid+  "Primary key, UUID"
-  "_TxId")
+  :_TxId)
 (def ^:private ^:constant +state+ "pending -> commited or rolled-back"
-  "_TxS")
+  :_TxS)
 (def ^:private ^:constant +requests+ "list of items participating in the transaction with unique IDs"
-  "_TxR")
+  :_TxR)
 (def ^:private ^:constant +version+ "a version number storing for detecting concurrent changes to a TX record."
-  "_TxV")
-(def ^:private ^:constant +finalized+ "_TxF")
-(def ^:private ^:constant +image-id+ "_TxI")
+  :_TxV)
+(def ^:private ^:constant +finalized+ :_Tx)
+(def ^:private ^:constant +image-id+ :_TxI)
 (def ^:private ^:constant +applied+ "indicating whether the transaction has performed the write to the item yet."
-  "_TxA")
+  :_TxA)
 (def ^:private ^:constant +transient+ "indicating if the item was inserted in order to acquire the lock."
-  "_TxT")
+  :_TxT)
 (def ^:private ^:constant +date+   "indicating approximately when the item was locked."
- "_TxD")
+ :_TxD)
 
 ;; State
 (def ^:private ^:constant +pending+ "P")
@@ -139,7 +139,7 @@
 (defn get-tx-item [txid]
   ;; tx-item {... :load-requests {:table1 {prim-keys1 request1} :table2 {prim-keys2 request2}}}
   (with-tx-attributes []
-    (let [tx-item (dl/get-item @tx-table-name {:txid txid} :consistent? true)]
+    (let [tx-item (dl/get-item @tx-table-name {+txid+ txid} :consistent? true)]
       (if (empty? tx-item)
         (utils/error "Transaction not found" {:type :transaction-not-found :txid txid})
         tx-item))))
@@ -224,6 +224,7 @@
            (add-request-map-to-current-tx tx-item request-atom) ;; yes this uses current-version
            ;; update *current-tx* as well
            (swap! *current-tx* assoc :tx-item new-tx-item)
+           (println tx-item new-tx-item)
            (utils/tx-assert (= new-version (inc current-version)) "Unexpected version number from update result")
            new-tx-item)
          (catch AmazonServiceException e
@@ -325,14 +326,10 @@
 
     tx-item))
 
-
-
-;;tx request true item-lock-acquire-attempts
-;;(lock-item tx request true item-lock-acquire-attempts)
-(defn- lock-item [tx request item-expected? attempts]
+(defn- lock-item [txid request item-expected? attempts]
   (let [key-map (prim-kvs request)
-        {:keys [table]} request
-        txid  (get tx +txid+)]
+        {:keys [table]} request]
+    (println ">>>" txid)
     (when (<= attempts 0)
       (utils/error "Unable to acquire item lock" {:type :transaction-exception :keys key-map}))
     (let [expected (cond-> {+txid+ false}
@@ -341,12 +338,12 @@
                              (not item-expected?) (merge {+transient+ [:put true]}))
           db-item (try (dl/update-item table key-map update-map :expected expected :return :all-new)
                        ;; ConditionalCheckFailedException means:
-                       ;; 1. +txid+ has a value already (lock-holder is this tx or else)
+                       ;; 1. +txid+ has a value already (lock-holder is this txid or else)
                        ;; 2. item is not there yet
                        (catch ConditionalCheckFailedException _
                          (dl/get-item table key-map :consistent? true)))
           lock-holder (get db-item +txid+)]
-      (cond (empty? lock-holder) (recur tx request false (dec attempts))
+      (cond (empty? lock-holder) (recur txid request false (dec attempts))
             (= lock-holder txid) db-item
             (> attempts 1) (do (try (rollback-using-txid lock-holder)
                                     (catch ExceptionInfo ex
@@ -357,7 +354,7 @@
                                ;; i.e., above rollback or release-read-lock
                                ;; successfully delete the item,
                                ;; item-expected? should be false!
-                               (recur tx request true (dec attempts)))
+                               (recur txid request true (dec attempts)))
             ;; i.e., attempts = 1
             :else (utils/error "Cannot grab a lock"
                                {:type :item-not-locked-exception :txid txid :lock-holder lock-holder
@@ -485,7 +482,7 @@
                                           {:type :transaction-not-in-pending-state :txid txid})))))
                   (recur (dec i)))))))
     ;; When the item locked, save it to the item image
-    (let [item  (lock-item tx @request-atom true item-lock-acquire-attempts)
+    (let [item  (lock-item txid @request-atom true item-lock-acquire-attempts)
           _     (save-item-image @request-atom item)
           tx-item (try (get-tx-item txid)
                        (catch ExceptionInfo e
