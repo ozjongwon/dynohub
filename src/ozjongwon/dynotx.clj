@@ -256,8 +256,8 @@
                   (when-not (transaction-completed? tx-item)
                     (utils/tx-assert "Expected the transaction to be completed (no item), but there was one."))
                   tx-item)
-                (catch ExceptionInfo e (when (not= (:type e) :transaction-not-found)
-                                            (utils/error e))))))))
+                (catch ExceptionInfo e (when (not= (:type (ex-data e)) :transaction-not-found)
+                                         (utils/error e))))))))
 
 (defn- get-requests-from-tx
   ([]   (get-requests-from-tx *current-tx*))
@@ -478,9 +478,9 @@
                                             {:type :transaction-commited :txid txid}))
         +rolled-back+      (do (post-rollback-cleanup tx-item)
                                (utils/error "The transaction already rolled back"
-                                            {:type :transaction-commited :txid txid}))
+                                            {:type :transaction-rolled-back :txid txid}))
         +pending+          nil
-        (utils/error "Unexpected state(add-request-to-tx-item)" {:type :transaction-exception :state (+state+ tx-item)}))
+        (utils/error "Unexpected state(add-request-to-tx-item)" {:type :unknown-completed-transaction :state (+state+ tx-item)}))
       (let [final-item (apply-and-keep-lock @request-atom item)]
         (when-not (nil? (:version request))
           (swap! tx assoc :fully-applied-request-versions (conj (:fully-applied-request-versions @tx) (:version request))))
@@ -544,11 +544,94 @@
     `(binding [*current-tx* (atom (new-transaction))]
          ~@body)))
 
-(defn delete-tx [tx]
-  )
+
+(defn item-locked? [item]
+  (contains? item +txid+))
+
+(defn item-applied? [item]
+  (contains? item +applied+))
+
+
+(defn is-transient [item]
+  (contains? item +transient+))
+
+(defn- delete-tx-item [tx-item]
+  (dl/delete-item @tx-table-name {+txid+ tx-item} :expected {+finalized+ true}))
+
+(defn delete-tx
+  ([tx] (delete-tx tx -1000))
+  ([tx timeout]
+     (let [tx-item (:tx-item tx)]
+       (if (transaction-completed? tx-item)
+         (when (< (+ (+date+ tx-item) timeout) (get-current-time))
+           (try (delete-tx-item tx-item)
+                (catch ConditionalCheckFailedException _
+                  (try (let [tx-item (get-tx-item (:txid tx))]
+                         (utils/error "Transaction was completed but could not be deleted" {:type :transaction-exception :tx-item tx-item}))
+                       (catch ExceptionInfo e
+                         (case (type e)
+                           :transaction-not-found nil
+                           (utils/error e)))))))
+         ;; FIXME: is tx-item updated everytime after reading from DB?
+         (try (let [tx-item (get-tx-item (+txid+ tx))]
+                (or (transaction-completed? tx-item)
+                    (utils/error "You can only delete a transaction that is completed"
+                                 {:type :transaction-exception :tx-item tx-item})))
+              (catch ExceptionInfo e
+                (case (type e)
+                  :transaction-not-found nil
+                  (utils/error e))))))))
+
+(defn swep [tx rollback-timeout delete-timeout]
+  (let [tx-item (:tx-item tx)]
+    (if (transaction-completed? tx-item)
+      (delete-tx-item tx-item delete-timeout)
+      (let [state (+state+ tx-item)
+            rollback-fn (fn []
+                          (try (rollback-using-txid (:txid tx))
+                               (catch ExceptionInfo e
+                                 (when-not (= (type (ex-data e)) :transaction-completed)
+                                   (utils/error e)))))]
+        (cond (= state +pending+)
+              (when (< (+ (+date+ tx-item) rollback-timeout) (get-current-time))
+                (rollback-fn))
+
+              (or (= state +committed+) (= state +rolled-back+))
+              (try (rollback-using-txid (:txid tx))
+                   (rollback-fn))
+
+              :else
+              (utils/tx-assert "Unexpected state in transaction: " state)))))))
 
 (defn commit-tx [tx]
-  )
+  (let [txid (:txid tx)]
+    (loop [i item-commit-attempts success? false]
+      (cond (<= i 0) (utils/error (str "Unable to commit transaction after " item-commit-attempts " attempts")
+                                  {:type :transaction-exception :txid txid})
+
+            success? :success
+
+            :else
+            (let [tx-item (try (get-tx-item txid)
+                               (catch ExceptionInfo e
+                                 (if (= (type (ex-data e)) :transaction-not-found)
+                                   (utils/error "In transaction 'commited' attempt, transaction either rolled back or committed"
+                                                {:type :unknown-completed-transaction :txid txid})
+                                   (utils/error e))))]
+
+              (condp = (+state+ tx-item)
+                +committed+     (when-not (transaction-completed? tx-item)
+                                  (post-commit-cleanup tx-item))
+                +rolled-back+   (do (when-not (transaction-completed? tx-item)
+                                      (post-rollback-cleanup tx-item))
+                                  (utils/error "Transaction was rolled back" {:type :transaction-rolled-back :txid txid}))
+                :else   (utils/tx-assert "Unexpected state for transaction: " txid))
+
+              (ensure-grabbing-all-locks tx)
+              (let [version (+version+ tx-item)]
+                (try (mark-committed-or-rolled-back txid +rolled-back+)
+                     (catch ConditionalCheckFailedException _ true)))
+              (recur (dec i) false))))))
 
 (defn commit-and-delete-tx [tx]
   )
