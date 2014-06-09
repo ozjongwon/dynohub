@@ -283,10 +283,10 @@
                                            {+txid+ [:delete] +transient+ [:delete] +applied+ [:delete] +date+ [:delete]}
                                            :expected expected))]
     (try (case (:op request)
-           :put-item         (put-or-update-op)
-           :update-itemop    (put-or-update-op)
-           :delete-item      (dl/delete-item @tx-table-name (prim-kvs request) :expected expected)
-           :get-item         (release-read-lock (+txid+ tx-item) (:table request) (prim-kvs request)))
+           :put-item    (put-or-update-op)
+           :update-item (put-or-update-op)
+           :delete-item (dl/delete-item @tx-table-name (prim-kvs request) :expected expected)
+           :get-item    (release-read-lock (+txid+ tx-item) (:table request) (prim-kvs request)))
          (catch ConditionalCheckFailedException _))))
 
 (defn- post-rollback-cleanup [tx-item]
