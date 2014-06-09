@@ -290,7 +290,7 @@
 (defmethod make-DynamoDB-parts :attribute-value-updates [_ update-map]
   (when-not (empty? update-map)
     (utils/maphash (fn [[k [action val]]]
-                     [(name k) (AttributeValueUpdate. (when val (make-DynamoDB-parts :attribute-value val))
+                     [(name k) (AttributeValueUpdate. (when-not (nil? val) (make-DynamoDB-parts :attribute-value val))
                                                       (keyword->DynamoDB-enum-str action))])
                    update-map)))
 
