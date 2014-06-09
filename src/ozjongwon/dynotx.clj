@@ -163,12 +163,11 @@
     result))
 
 (defn- transaction-completed? [tx-item]
-#_  (println tx-item)
-  (utils/tx-assert (contains? tx-item +finalized+))
-  (let [finalized? (+finalized+ tx-item)
+  (let [finalized? (contains? tx-item +finalized+)
         state (+state+ tx-item)]
-    (utils/tx-assert (and finalized? (contains? #{+committed+ +rolled-back+} state))
-                     "Unexpected terminal state for completed tx" :state state :tx-item tx-item)
+    (when finalized?
+      (utils/tx-assert (contains? #{+committed+ +rolled-back+} state)
+                       "Unexpected terminal state for completed tx" :state state :tx-item tx-item))
     finalized?))
 
 (defn- add-request-map-to-current-tx [tx-item request-atom]
