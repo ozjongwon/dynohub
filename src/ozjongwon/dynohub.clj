@@ -167,7 +167,7 @@
 ;;; Simple binary reader/writer
 ;;;
 (defn- sexp->byte-buffer ^ByteBuffer [sexp]
-  (-> (binding [*print-dup* true] (pr-str sexp))
+  (-> (pr-str sexp)
       (.getBytes)
       (ByteBuffer/wrap)))
 
@@ -320,7 +320,7 @@
 (defmethod make-DynamoDB-parts :attribute-value-updates [_ update-map]
   (when-not (empty? update-map)
     (maphash (fn [[k [action val]]]
-               [(name k) (AttributeValueUpdate. (make-DynamoDB-parts :attribute-value val)
+               [(name k) (AttributeValueUpdate. (when-not (nil? val) (make-DynamoDB-parts :attribute-value val))
                                                 (keyword->DynamoDB-enum-str action))])
              update-map)))
 
