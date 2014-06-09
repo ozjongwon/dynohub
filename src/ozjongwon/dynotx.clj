@@ -163,6 +163,7 @@
     result))
 
 (defn- transaction-completed? [tx-item]
+#_  (println tx-item)
   (utils/tx-assert (contains? tx-item +finalized+))
   (let [finalized? (+finalized+ tx-item)
         state (+state+ tx-item)]
@@ -276,17 +277,29 @@
 
     (finalize-transaction tx-item +committed+)))
 
-(defn- rollback-item-and-release-lock [request])
+(defn- rollback-item-and-release-lock [tx-item request]
+  (let [expected (select-keys tx-item [+txid+])
+        put-or-update-op (fn []
+                           (dl/update-item @tx-table-name (prim-kvs request)
+                                           {+txid+ [:delete] +transient+ [:delete] +applied+ [:delete] +date+ [:delete]}
+                                           :expected expected))]
+    (try (case (:op request)
+           :put-item         (put-or-update-op)
+           :update-itemop    (put-or-update-op)
+           :delete-item      (dl/delete-item @tx-table-name (prim-kvs request) :expected expected)
+           :get-item         (release-read-lock (+txid+ tx-item) (:table request) (prim-kvs request)))
+         (catch ConditionalCheckFailedException _))))
+
 (defn- post-rollback-cleanup [tx-item]
   (utils/tx-assert (= (+state+ tx-item) +rolled-back+)
                    "Transaction state is not ROLLED_BACK" :state (+state+ tx-item) :tx-item tx-item)
   (doseq [request (get-requests-from-tx)]
-    (rollback-item-and-release-lock request)
+    (rollback-item-and-release-lock tx-item request)
     (delete-item-image tx-item (:version request)))
 
   (finalize-transaction tx-item +rolled-back+))
 
-(defn- rollback-using-txid [txid]
+(defn- rollback-using-txid [txid] ;; rollback
   (let [tx-item (try (mark-committed-or-rolled-back txid +rolled-back+)
                      ;; (Maybe??)Fails when
                      ;; 1. it is not in PENDING state
@@ -342,11 +355,11 @@
                                 :table table :key key-map})))))
 
 (declare add-request-to-transaction)
-(defn- ensure-grabbing-all-locks [tx]
-  (let [fully-applied-request-versions (:fully-applied-request-versions @tx)]
-    (for [request (get-requests-from-tx tx)]
+(defn- ensure-grabbing-all-locks [tx-atom]
+  (let [fully-applied-request-versions (:fully-applied-request-versions @tx-atom)]
+    (for [request (get-requests-from-tx tx-atom)]
       (when-not (contains? fully-applied-request-versions (:version request))
-        (add-request-to-transaction tx request true item-lock-acquire-attempts)))))
+        (add-request-to-transaction tx-atom request true item-lock-acquire-attempts)))))
 
 (defn- save-item-image [request item]
   (when-not (or (= (:op request) :get-item) (contains? item +applied+) (contains? item +transient+))
@@ -542,8 +555,10 @@
        (binding [*current-tx* ~@tx]
          ~@body))
     `(binding [*current-tx* (atom (new-transaction))]
-         ~@body)))
-
+       (let [result# (do ~@body)]
+         (commit *current-tx*)
+         (delete @*current-tx*)
+         result#))))
 
 (defn item-locked? [item]
   (contains? item +txid+))
@@ -558,8 +573,8 @@
 (defn- delete-tx-item [tx-item]
   (dl/delete-item @tx-table-name {+txid+ tx-item} :expected {+finalized+ true}))
 
-(defn delete-tx
-  ([tx] (delete-tx tx -1000))
+(defn delete
+  ([tx] (delete tx -1000))
   ([tx timeout]
      (let [tx-item (:tx-item tx)]
        (if (transaction-completed? tx-item)
@@ -582,7 +597,7 @@
                   :transaction-not-found nil
                   (utils/error e))))))))
 
-(defn swep [tx rollback-timeout delete-timeout]
+(defn sweep [tx rollback-timeout delete-timeout]
   (let [tx-item (:tx-item tx)]
     (if (transaction-completed? tx-item)
       (delete-tx-item tx-item delete-timeout)
@@ -601,10 +616,10 @@
                    (rollback-fn))
 
               :else
-              (utils/tx-assert "Unexpected state in transaction: " state)))))))
+              (utils/tx-assert "Unexpected state in transaction: " state))))))
 
-(defn commit-tx [tx]
-  (let [txid (:txid tx)]
+(defn commit [tx-atom]                    ;; commit
+  (let [txid (:txid @tx-atom)]
     (loop [i item-commit-attempts success? false]
       (cond (<= i 0) (utils/error (str "Unable to commit transaction after " item-commit-attempts " attempts")
                                   {:type :transaction-exception :txid txid})
@@ -618,30 +633,26 @@
                                    (utils/error "In transaction 'commited' attempt, transaction either rolled back or committed"
                                                 {:type :unknown-completed-transaction :txid txid})
                                    (utils/error e))))]
-
               (condp = (+state+ tx-item)
                 +committed+     (when-not (transaction-completed? tx-item)
                                   (post-commit-cleanup tx-item))
                 +rolled-back+   (do (when-not (transaction-completed? tx-item)
                                       (post-rollback-cleanup tx-item))
                                   (utils/error "Transaction was rolled back" {:type :transaction-rolled-back :txid txid}))
-                :else   (utils/tx-assert "Unexpected state for transaction: " txid))
+                (utils/tx-assert "Unexpected state for transaction: " txid))
 
-              (ensure-grabbing-all-locks tx)
+              (ensure-grabbing-all-locks tx-atom)
               (let [version (+version+ tx-item)]
                 (try (mark-committed-or-rolled-back txid +rolled-back+)
                      (catch ConditionalCheckFailedException _ true)))
               (recur (dec i) false))))))
-
-(defn commit-and-delete-tx [tx]
-  )
 
 (defn get-item [table prim-kvs & opts]
   (validate-special-attributes-exclusion (:keys prim-kvs))
   (attempt-to-add-request-to-tx *current-tx* (cond-> {:op :get-item :table table :prim-kvs prim-kvs}
                                                      opts (assoc :opts (apply hash-map opts)))))
 
-(defn mutate-item [tx attributes request opts]
+(defn- mutate-item [tx attributes request opts]
   (let [opts (when opts (apply hash-map opts))]
     (validate-write-item-arguments attributes opts)
     (attempt-to-add-request-to-tx tx (cond-> request
