@@ -290,9 +290,9 @@
 (defmethod make-DynamoDB-parts :attribute-value-updates [_ update-map]
   (when-not (empty? update-map)
     (utils/maphash (fn [[k [action val]]]
-               [(name k) (AttributeValueUpdate. (make-DynamoDB-parts :attribute-value val)
-                                                (keyword->DynamoDB-enum-str action))])
-             update-map)))
+                     [(name k) (AttributeValueUpdate. (when val (make-DynamoDB-parts :attribute-value val))
+                                                      (keyword->DynamoDB-enum-str action))])
+                   update-map)))
 
 (defmethod make-DynamoDB-parts :keys-and-attributes [_ requests]
   (utils/maphash (fn [[k {:keys [prim-kvs attrs consistent?]}]]
