@@ -279,7 +279,7 @@
 (defn- rollback-item-and-release-lock [tx-item request]
   (let [expected (select-keys tx-item [+txid+])
         put-or-update-op (fn []
-                           (dl/update-item @tx-table-name (prim-kvs request)
+                           (dl/update-item (:table request) (prim-kvs request)
                                            {+txid+ [:delete] +transient+ [:delete] +applied+ [:delete] +date+ [:delete]}
                                            :expected expected))]
     (try (case (:op request)
@@ -365,7 +365,7 @@
     ;;(utils/tx-assert (= (get item +txid+) (:txid request)) "This will never happen in the real world!")
     ;;(utils/tx-assert (nil? (get item +image-id+)) "This will never happen in the real world!")
     (let [image-id (str (:txid request) "#" (:version request))]
-      (try (dl/put-item @image-table-name (merge item {+image-id+ image-id +txid+ (:txid request)} :expected {+image-id+ false}))
+      (try (dl/put-item @image-table-name (merge item {+image-id+ image-id +txid+ (:txid request)}) :expected {+image-id+ false})
            ;; Already exists! Ignore!
            (catch ConditionalCheckFailedException _)))))
 
