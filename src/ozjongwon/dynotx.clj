@@ -621,10 +621,10 @@
 (defn commit [tx-atom] ;; commit
   (let [txid (:txid @tx-atom)]
     (loop [i item-commit-attempts success? false]
-      (cond (<= i 0) (utils/error (str "Unable to commit transaction after " (inc item-commit-attempts) " attempts")
-                                  {:type :transaction-exception :txid txid})
+      (cond success? :success
 
-            success? :success
+            (<= i 0) (utils/error (str "Unable to commit transaction after " (inc item-commit-attempts) " attempts")
+                                  {:type :transaction-exception :txid txid})
 
             :else
             (let [tx-item (try (get-tx-item txid)
@@ -633,19 +633,30 @@
                                    (utils/error "In transaction 'commited' attempt, transaction either rolled back or committed"
                                                 {:type :unknown-completed-transaction :txid txid})
                                    (utils/error e))))]
-              (condp = (+state+ tx-item)
-                +committed+     (when-not (transaction-completed? tx-item)
-                                  (post-commit-cleanup tx-item))
-                +rolled-back+   (do (when-not (transaction-completed? tx-item)
-                                      (post-rollback-cleanup tx-item))
-                                    (utils/error "Transaction was rolled back" {:type :transaction-rolled-back :txid txid}))
-                (utils/error (str "Unexpected state for transaction: " (+state+ tx-item))))
 
-              (ensure-grabbing-all-locks tx-atom)
-              (let [version (+version+ tx-item)
-                    committed? (try (do (mark-committed-or-rolled-back txid +committed+) true)
-                                    (catch ConditionalCheckFailedException _ false))]
-                (recur (dec i) committed?)))))))
+              (let [completed? (transaction-completed? tx-item)
+                    state      (+state+ tx-item)
+                    success?   (cond (and completed? (= state +committed+)) true
+
+                                     (and completed? (= state +rolled-back+))
+                                     (utils/error "Transaction was rolled back"
+                                                  {:type :transaction-rolled-back :txid txid})
+
+                                     completed?   (utils/error (str "Unexpected state for transaction: "
+                                                                    (+state+ tx-item)))
+
+                                     (= state +committed+) (do (post-commit-cleanup tx-item)
+                                                               true)
+
+                                     (= state +rolled-back+)
+                                     (do (post-rollback-cleanup tx-item)
+                                         (utils/error "Transaction was rolled back"
+                                                      {:type :transaction-rolled-back :txid txid}))
+                                     :else false)]
+                (ensure-grabbing-all-locks tx-atom)
+                (try (mark-committed-or-rolled-back txid +committed+)
+                     (catch ConditionalCheckFailedException _ false))
+                (recur (dec i) success?)))))))
 
 (defn get-item [table prim-kvs & opts]
   (validate-special-attributes-exclusion (:keys prim-kvs))
