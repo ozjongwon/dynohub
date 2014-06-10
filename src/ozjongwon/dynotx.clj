@@ -254,7 +254,7 @@
          (catch ConditionalCheckFailedException _
            (try (let [tx-item (get-tx-item txid)]
                   (when-not (transaction-completed? tx-item)
-                    (utils/tx-assert "Expected the transaction to be completed (no item), but there was one."))
+                    (utils/error "Expected the transaction to be completed (no item), but there was one."))
                   tx-item)
                 (catch ExceptionInfo e (when (not= (:type (ex-data e)) :transaction-not-found)
                                          (utils/error e))))))))
@@ -616,7 +616,7 @@
                    (rollback-fn))
 
               :else
-              (utils/tx-assert "Unexpected state in transaction: " state))))))
+              (utils/error (str "Unexpected state in transaction: " state)))))))
 
 (defn commit [tx-atom] ;; commit
   (let [txid (:txid @tx-atom)]
@@ -639,7 +639,7 @@
                 +rolled-back+   (do (when-not (transaction-completed? tx-item)
                                       (post-rollback-cleanup tx-item))
                                     (utils/error "Transaction was rolled back" {:type :transaction-rolled-back :txid txid}))
-                (utils/tx-assert "Unexpected state for transaction: " txid))
+                (utils/error (str "Unexpected state for transaction: " (+state+ tx-item))))
 
               (ensure-grabbing-all-locks tx-atom)
               (let [version (+version+ tx-item)
