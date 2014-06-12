@@ -211,15 +211,16 @@
          (catch AmazonServiceException e
            (utils/error "Unexpected AmazonServiceException. Updating failed" {:type :amazon-service-error :error e})))))
 
-(defn- release-read-lock [txid table key-map]
-  (try (dl/update-item table key-map {+txid+ [:delete] +date+ [:delete]}
+(defn- release-read-lock [table keys txid]
+  (try (dl/update-item table keys {+txid+ [:delete] +date+ [:delete]}
                        :expected {+txid+ txid +transient+ false +applied+ false})
        (catch ConditionalCheckFailedException _
-         (try (dl/delete-item table key-map :expected  {+txid+ txid +transient+ true +applied+ false})
+         (try (dl/delete-item table keys :expected {+txid+ txid +transient+ true +applied+ false})
               (catch ConditionalCheckFailedException _
-                (let [item (dl/get-item table key-map)]
-                  (utils/tx-assert (and (not (empty? item)) (= txid (get item +txid+)) (contains? item +applied+))
-                                   "Item should not have been applied.  Unable to release lock" :item item)))))))
+                (let [item (dl/get-item table keys :consistent? true)]
+                  (utils/tx-assert (not (and (not (empty? item)) (= (get item +txid+) txid) (contains? item +applied+)))
+                                   "Item should not have been applied. Unable to release lock item" item)))))))
+
 
 (defmulti unlock-item-after-commit-using-op :op)
 
@@ -368,16 +369,6 @@
       (try (dl/put-item @image-table-name (merge item {+image-id+ image-id +txid+ (:txid request)}) :expected {+image-id+ false})
            ;; Already exists! Ignore!
            (catch ConditionalCheckFailedException _)))))
-
-(defn- release-read-lock [table keys txid]
-  (try (dl/update-item table keys {+txid+ [:delete] +date+ [:delete]}
-                       :expected {+txid+ txid +transient+ false +applied+ false})
-       (catch ConditionalCheckFailedException _
-         (try (dl/delete-item table keys :expected {+txid+ txid +transient+ true +applied+ false})
-              (catch ConditionalCheckFailedException _
-                (let [item (dl/get-item table keys :consistent? true)]
-                  (utils/tx-assert (not (and item (= (get item +txid+) txid) (contains? item +applied+)))
-                                   "Item should not have been applied. Unable to release lock item" item)))))))
 
 (defmulti apply-request-op :op)
 (defmethod apply-request-op :put-item [request locked-item]
