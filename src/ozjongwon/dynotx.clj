@@ -560,38 +560,33 @@
 (defn is-transient [item]
   (contains? item +transient+))
 
-(defn- delete-tx-item [tx-item]
-  (dl/delete-item @tx-table-name {+txid+ tx-item} :expected {+finalized+ true}))
+(defn- delete-tx-item [txid]
+  (dl/delete-item @tx-table-name {+txid+ txid} :expected {+finalized+ true}))
 
 (defn delete
   ([tx] (delete tx -1000))
   ([tx timeout]
-     (let [tx-item (:tx-item tx)
-           txid (:txid tx)]
-       (if (transaction-completed? tx-item)
+     (letfn [(get-completed-tx-item [tx]
+               (let [tx-item (:tx-item tx)
+                     txid (:txid tx)]
+                 (when-not (transaction-completed? tx-item)
+                   (try (let [tx-item (get-tx-item txid)]
+                          (or (transaction-completed? tx-item)
+                              (utils/error "You can only delete a transaction that is completed"
+                                           {:type :transaction-exception :tx-item tx-item}))
+                          tx-item)
+                        (catch ExceptionInfo e
+                          (case (type e)
+                            :transaction-not-found nil ;; deleted
+                            (utils/error e)))))))]
+       (when-let [tx-item (get-completed-tx-item tx)]
          (when (< (+ (+date+ tx-item) timeout) (get-current-time))
-           (try (delete-tx-item tx-item)
-                (catch ConditionalCheckFailedException _
-                  (try (let [tx-item (get-tx-item txid)]
-                         (utils/error "Transaction was completed but could not be deleted" {:type :transaction-exception :tx-item tx-item}))
-                       (catch ExceptionInfo e
-                         (case (type e)
-                           :transaction-not-found nil
-                           (utils/error e)))))))
-         ;; FIXME: is tx-item updated everytime after reading from DB?
-         (try (let [tx-item (get-tx-item txid)]
-                (or (transaction-completed? tx-item)
-                    (utils/error "You can only delete a transaction that is completed"
-                                 {:type :transaction-exception :tx-item tx-item})))
-              (catch ExceptionInfo e
-                (case (type e)
-                  :transaction-not-found nil
-                  (utils/error e))))))))
+           (delete-tx-item (:txid tx)))))))
 
 (defn sweep [tx rollback-timeout delete-timeout]
   (let [tx-item (:tx-item tx)]
     (if (transaction-completed? tx-item)
-      (delete-tx-item tx-item delete-timeout)
+      (delete tx-item delete-timeout)
       (let [state (+state+ tx-item)
             rollback-fn (fn []
                           (try (rollback-using-txid (:txid tx))
