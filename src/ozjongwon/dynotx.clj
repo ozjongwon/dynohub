@@ -587,7 +587,10 @@
              (delete-tx-item (:txid tx))))))))
 
 (defn sweep [tx rollback-timeout delete-timeout]
-  (let [tx-item (:tx-item tx)]
+  (let [tx (if (instance? clojure.lang.Atom tx)
+                  @tx
+                  tx)
+        tx-item (:tx-item tx)]
     (if (transaction-completed? tx-item)
       (delete tx-item delete-timeout)
       (let [state (+state+ tx-item)
@@ -601,8 +604,10 @@
                 (rollback-fn))
 
               (or (= state +committed+) (= state +rolled-back+))
-              (try (rollback-using-txid (:txid tx))
-                   (rollback-fn))
+              (try (rollback-fn)
+                   (catch ExceptionInfo e
+                     (when-not (:type (ex-data e) :transaction-completed)
+                       (utils/error e))))
 
               :else
               (utils/error (str "Unexpected state in transaction: " state)))))))
@@ -687,7 +692,8 @@
     (try (commit t1)
          (catch ExceptionInfo e
            (println "T1 was rolled back" (ex-data e))
+           (sweep t1 0 0)
            (delete t1)))
     (put-item :tx-ex {:id "conflictingTransactions_Item3" :which-transaction? :t2-win!})
 
-  ))
+    ))
