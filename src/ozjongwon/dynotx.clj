@@ -579,9 +579,12 @@
                           (case (type e)
                             :transaction-not-found nil ;; deleted
                             (utils/error e)))))))]
-       (when-let [tx-item (get-completed-tx-item tx)]
-         (when (< (+ (+date+ tx-item) timeout) (get-current-time))
-           (delete-tx-item (:txid tx)))))))
+       (let [tx (if (instance? clojure.lang.Atom tx)
+                  @tx
+                  tx)]
+         (when-let [tx-item (get-completed-tx-item tx)]
+           (when (< (+ (+date+ tx-item) timeout) (get-current-time))
+             (delete-tx-item (:txid tx))))))))
 
 (defn sweep [tx rollback-timeout delete-timeout]
   (let [tx-item (:tx-item tx)]
@@ -668,3 +671,23 @@
 ;;(init-tx)
 ;;(begin-transaction)
 ;;(dl/get-item @tx-table-name {+txid+ "3ede573e-0087-4ddf-bd0b-37571cbd6b6c"})
+
+(dl/ensure-table :tx-ex [:id :s])
+(with-transaction []
+  (put-item :tx-ex {:id "item1"})
+  (put-item :tx-ex {:id "item2"}))
+
+(with-transaction [t1]
+  (put-item :tx-ex {:id "conflictingTransactions_Item1" :which-transaction? :t1})
+
+  (put-item :tx-ex {:id "conflictingTransactions_Item2"})
+
+  (with-transaction []
+    (put-item :tx-ex {:id "conflictingTransactions_Item1" :which-transaction? :t2-win!})
+    (try (commit t1)
+         (catch ExceptionInfo e
+           (println "T1 was rolled back" (ex-data e))
+           (delete t1)))
+    (put-item :tx-ex {:id "conflictingTransactions_Item3" :which-transaction? :t2-win!})
+
+  ))
