@@ -225,7 +225,7 @@
 (defmulti unlock-item-after-commit-using-op :op)
 
 (defn- %put-or-update-request-unlock [txid req]
-  (dl/update-item (:table req) (:prim-kvs req) {+txid+ [:delete] +transient+ [:delete] +applied+ [:delete] +date+ [:delete]}
+  (dl/update-item (:table req) (prim-kvs req) {+txid+ [:delete] +transient+ [:delete] +applied+ [:delete] +date+ [:delete]}
                   :expected {+txid+ txid}))
 
 (defmethod unlock-item-after-commit-using-op :update-item [req txid]
@@ -235,10 +235,10 @@
   (%put-or-update-request-unlock txid req))
 
 (defmethod unlock-item-after-commit-using-op :delete-item [req txid]
-  (dl/delete-item (:table req) (:prim-kvs req) :expected {+txid+ txid}))
+  (dl/delete-item (:table req) (prim-kvs req) :expected {+txid+ txid}))
 
 (defmethod unlock-item-after-commit-using-op :get-item [req txid]
-  (release-read-lock txid (:table req) (:prim-kvs req)))
+  (release-read-lock txid (:table req) (prim-kvs req)))
 
 (defn- unlock-item-after-commit [txid req]
   (try (unlock-item-after-commit-using-op req txid)
@@ -267,12 +267,14 @@
 (defn- post-commit-cleanup [tx-item] ;; doCommit
   (let [state (+state+ tx-item)
         requests (get-requests-from-tx)]
+    (println "1111111111111")
     (utils/tx-assert (= state +committed+)
                      "Unexpected state instead of COMMITTED" :state state :tx-item tx-item)
-    (for [request requests]
-      (unlock-item-after-commit (:txid tx-item) request))
+    (println "22222222222")
+    (doseq [request requests]
+      (unlock-item-after-commit (+txid+ tx-item) request))
 
-    (for [request requests]
+    (doseq [request requests]
       (delete-item-image tx-item (:version request)))
 
     (finalize-transaction tx-item +committed+)))
@@ -357,7 +359,7 @@
 (declare add-request-to-transaction)
 (defn- ensure-grabbing-all-locks [tx-atom]
   (let [fully-applied-request-versions (:fully-applied-request-versions @tx-atom)]
-    (for [request (get-requests-from-tx tx-atom)]
+    (doseq [request (get-requests-from-tx tx-atom)]
       (when-not (contains? fully-applied-request-versions (:version request))
         (add-request-to-transaction tx-atom request true item-lock-acquire-attempts)))))
 
@@ -365,8 +367,8 @@
   (when-not (or (= (:op request) :get-item) (contains? item +applied+) (contains? item +transient+))
     ;;(utils/tx-assert (= (get item +txid+) (:txid request)) "This will never happen in the real world!")
     ;;(utils/tx-assert (nil? (get item +image-id+)) "This will never happen in the real world!")
-    (let [image-id (str (:txid request) "#" (:version request))]
-      (try (dl/put-item @image-table-name (merge item {+image-id+ image-id +txid+ (:txid request)}) :expected {+image-id+ false})
+    (let [image-id (str (+txid+ item) "#" (:version request))]
+      (try (dl/put-item @image-table-name (merge item {+image-id+ image-id +txid+ (+txid+ item)}) :expected {+image-id+ false})
            ;; Already exists! Ignore!
            (catch ConditionalCheckFailedException _)))))
 
@@ -382,7 +384,7 @@
 (defmethod apply-request-op :update-item [request locked-item]
   (apply dl/update-item
          (:table request)
-         (:prim-kvs request)
+         (prim-kvs request)
          (assoc (:update-map request) +applied+ [:put true])
          :expected {+txid+ (get locked-item +txid+) +applied+ false}
          (utils/hash-map->list (:opts request))))
