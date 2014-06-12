@@ -267,10 +267,8 @@
 (defn- post-commit-cleanup [tx-item] ;; doCommit
   (let [state (+state+ tx-item)
         requests (get-requests-from-tx)]
-    (println "1111111111111")
     (utils/tx-assert (= state +committed+)
                      "Unexpected state instead of COMMITTED" :state state :tx-item tx-item)
-    (println "22222222222")
     (doseq [request requests]
       (unlock-item-after-commit (+txid+ tx-item) request))
 
