@@ -657,6 +657,42 @@
   (attempt-to-add-request-to-tx *current-tx* (cond-> {:op :get-item :table table :prim-kvs prim-kvs}
                                                      opts (assoc :opts (apply hash-map opts)))))
 
+(defn- get-item-uncommitted [table prim-kvs opts-map]
+  (let [item (dl/get-item table prim-kvs opts-map)]
+    (if (and (+transient+ item) (not (+applied+ item)))
+      nil
+      item)))
+
+;; (defn- get-item-committed [table prim-kvs opts-map]
+;;   (loop [i 3]
+;;     (if (<= i 0)
+;;       (utils/error "Ran out of attempts to get a committed image of the item")
+;;       (let [item (dl/get-item table prim-kvs opts-map)
+;;             owner (+txid+ item)]
+;;         (if (or (nil? item) (+transient+ item) (not (+applied+ item)) (nil? owner))
+;;           item
+;;           (let [tx-item (get-tx-item owner)]
+;;             (if (= (+state+ tx-item) +committed+)
+;;               item
+;;               (let [locking-request-op (get-in (:requests-map @*current-tx*) [(:table request) (prim-kvs request)])
+;;                     _ (utils/tx-assert locking-request-op "Expected transaction to be locking request, but no request found for tx")
+;;                     old-item (binding [*current-tx* tx-item]
+;;                                (load-item-image (:version request)))]
+
+;;       (recur (dec i)))))
+
+
+(defn get-item-with-isolation-level [table prim-kvs isolation-level & opts]
+  (let [opts-map (hash-map opts)
+        opts-map+ (if (contains? opts-map :attr)
+                    (update-in [:attr] (partial apply conj) (vec special-attributes))
+                    opts-map)]
+    (case isolation-level
+        :uncommitted    (get-item-uncommitted table prim-kvs opts-map+)
+;;        :committed      (get-item-committed table prim-kvs opts-map+))))
+        )))
+
+
 (defn- mutate-item [tx attributes request opts]
   (let [opts (when opts (apply hash-map opts))]
     (validate-write-item-arguments attributes opts)
@@ -677,23 +713,27 @@
 ;;(begin-transaction)
 ;;(dl/get-item @tx-table-name {+txid+ "3ede573e-0087-4ddf-bd0b-37571cbd6b6c"})
 
-(dl/ensure-table :tx-ex [:id :s])
-(with-transaction []
-  (put-item :tx-ex {:id "item1"})
-  (put-item :tx-ex {:id "item2"}))
+;; (with-transaction []
+;;   (put-item :tx-ex {:id "item1"})
+;;   (put-item :tx-ex {:id "item2"}))
 
-(with-transaction [t1]
-  (put-item :tx-ex {:id "conflictingTransactions_Item1" :which-transaction? :t1})
+(defn foo []
+  (dl/delete-table   :_image_table_)
+  (dl/delete-table   :_tx_table_ )
+  (dl/delete-table   :tx-ex)
+  (init-tx)
+  (dl/ensure-table :tx-ex [:id :s])
 
-  (put-item :tx-ex {:id "conflictingTransactions_Item2"})
+  (with-transaction [t1]
+    (put-item :tx-ex {:id "conflictingTransactions_Item1" :which-transaction? :t1})
 
-  (with-transaction []
-    (put-item :tx-ex {:id "conflictingTransactions_Item1" :which-transaction? :t2-win!})
-    (try (commit t1)
-         (catch ExceptionInfo e
-           (println "T1 was rolled back" (ex-data e))
-           (sweep t1 0 0)
-           (delete t1)))
-    (put-item :tx-ex {:id "conflictingTransactions_Item3" :which-transaction? :t2-win!})
+    (put-item :tx-ex {:id "conflictingTransactions_Item2"})
 
-    ))
+    (with-transaction []
+      (put-item :tx-ex {:id "conflictingTransactions_Item1" :which-transaction? :t2-win!})
+      (try (commit t1)
+           (catch ExceptionInfo e
+             (println "T1 was rolled back" (ex-data e))
+             (sweep t1 0 0)
+             (delete t1)))
+      (put-item :tx-ex {:id "conflictingTransactions_Item3" :which-transaction? :t2-win!}))))
