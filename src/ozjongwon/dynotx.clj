@@ -21,7 +21,8 @@
   {:author "Jong-won Choi"}
   (:require [ozjongwon.dynolite  :as dl]
             [ozjongwon.dynohub  :as dh]
-            [ozjongwon.utils    :as utils])
+            [ozjongwon.utils    :as utils]
+            [clojure.set])
   (:import  [com.amazonaws.services.dynamodbv2.model
              ConditionalCheckFailedException]
             [com.amazonaws
@@ -34,7 +35,6 @@
 ;;;
 (defn- get-current-time []
   (quot (System/currentTimeMillis) 1000))
-
 
 (defn- make-txid []
   (str (UUID/randomUUID)))
@@ -86,18 +86,10 @@
 (def ^:private ^:constant +committed+ "C")
 (def ^:private ^:constant +rolled-back+ "R")
 
-    ;; public enum State {
-    ;;     PENDING,
-    ;;     COMMITTED,
-    ;;     ROLLED_BACK
-    ;; }
-
-
-    ;; public enum IsolationLevel {
-    ;;     UNCOMMITTED,
-    ;;     COMMITTED,
-    ;;     READ_LOCK // what does it mean to read an item you wrote to in a transaction?
-    ;; }
+;; public enum IsolationLevel {
+;;     UNCOMMITTED,
+;;     COMMITTED,
+;;     READ_LOCK // what does it mean to read an item you wrote to in a transaction?
 
 
 (def ^:private ^:constant special-attributes
@@ -107,33 +99,82 @@
   `(binding [dh/*special-enums* ~special-attributes]
      ~@body))
 
-(defn- insert-and-return-tx-item [txid]
-  (let [tx-item {+txid+ txid +state+ +pending+ +version+ 1 +date+ (get-current-time)}]
-    (try (with-tx-attributes []
-           (dl/put-item @tx-table-name
-                        tx-item
-                        :expected {+txid+ false +state+ false}))
-         (catch ConditionalCheckFailedException e
-           (utils/error "Failed to create new transaction"
-                    {:type :transaction-exception :txid txid :exception e})))
-    tx-item))
+;;;
+;;; Primitive functions, etc
+;;;
+;;;
+;;; tx(transaction) = tx-item + :fully-applied-request-versions + requests-map
+;;;
+(def tx-map (ref {}))
+
+(defn- txid->tx [txid]
+  (get @tx-map txid))
+
+(defn- tx-item->tx [tx-item]
+  (let [existing-tx (get @tx-map (+txid+ tx-item))]
+    (assoc existing-tx
+
+      :fully-applied-request-versions
+      (:fully-applied-request-versions existing-tx)
+
+      :requests-map
+      (:requests-map existing-tx))))
+
+(defn- update-tx-map!
+  ([tx-item]
+     (update-tx-map! tx-item nil))
+  ([tx-item kv-map]
+     (let [txid (+txid+ tx-item)]
+       (dosync (alter tx-map assoc txid tx-item)
+               (doseq [[k v] kv-map]
+                 (alter tx-map assoc-in `[~txid ~@k] v))))))
+
+(defmacro with-updating-tx-map-on-success [[& {:keys [transformer] :or {transformer 'identity}}] & body]
+  `(let [tx-item# (do ~@body)]
+     (utils/tx-assert (contains? tx-item# +txid+) "Unexpected result for with-updating-tx-map-on-success")
+     (update-tx-map! (~transformer tx-item#))
+     tx-item#))
+
+(defn- transaction->tx-item [tx]
+  (dissoc tx :fully-applied-request-versions))
+
+(defn- fully-applied-request-versions [txid]
+  (:fully-applied-request-versions (txid->tx txid)))
+
+(defn- get-tx-requests [txid]
+  (mapcat (fn [[_ map]] (vals map)) (:requests-map (txid->tx txid))))
+
+(defn- insert-and-return-tx-item
+  "Insert a new transaction item with txid into transaction table"
+  [txid]
+  ;; make-transaction uses this function and tx-map update happens in make-transaction
+  (with-tx-attributes []
+    (let [item {+txid+ txid +state+ +pending+ +version+ 1 +date+ (get-current-time)}]
+      (dl/put-item @tx-table-name
+                   item
+                   :expected {+txid+ false})
+      (assoc item :fully-applied-request-versions #{} :requests-map {}))))
 
 (defn get-tx-item [txid]
   ;; tx-item {... :load-requests {:table1 {prim-keys1 request1} :table2 {prim-keys2 request2}}}
   (with-tx-attributes []
-    (let [tx-item (dl/get-item @tx-table-name {+txid+ txid} :consistent? true)]
-      (if (empty? tx-item)
-        (utils/error "Transaction not found" {:type :transaction-not-found :txid txid})
+    (with-updating-tx-map-on-success [:transformer tx-item->tx]
+      (let [tx-item (dl/get-item @tx-table-name {+txid+ txid} :consistent? true)]
+        (when-not tx-item
+          (utils/error "Transaction not found" {:type :transaction-not-found :txid txid}))
         tx-item))))
 
-;;;
-;;; Transaction
-;;;
-
-(defn- new-transaction []
-  (let [txid (make-txid)]
-    {:txid txid :tx-item (insert-and-return-tx-item txid)
-     :fully-applied-request-versions (sorted-set)}))
+(defn- make-transaction
+  "Make a new transaction. Transaction = tx-item + fully-applied-request-versions"
+  ([]
+     (make-transaction (make-txid)))
+  ([tx-id-or-item]
+     (with-updating-tx-map-on-success []
+       (let [result (utils/type-case tx-id-or-item
+                       String           (make-transaction (insert-and-return-tx-item tx-id-or-item))
+                       clojure.lang.IPersistentMap tx-id-or-item
+                       :else (utils/error "Unexpected argument for make-transaction" {:arg tx-id-or-item}))]
+         result))))
 
 (defn- valid-return-value? [rv]
   (or (nil? rv) (contains? #{:all-old :all-new :none} rv)))
@@ -151,30 +192,38 @@
 (defmethod prim-kvs :default [req]
   (:prim-kvs req))
 
-(defn- mark-committed-or-rolled-back [txid state & [version]] ;; finish
+
+
+
+;;;
+;;; Transaction logic
+;;;
+(defn- mark-committed-or-rolled-back [txid state]
   (utils/tx-assert (contains? #{+committed+ +rolled-back+} state) "Unexpected state in (mark-committed-or-rolled-back)" state :txid txid)
-  (let [result (dl/update-item @tx-table-name {+txid+ txid}
-                               {+state+ [:put state] +date+ [:put (get-current-time)]}
-                               :return :all-new
-                               :expected (cond-> {+state+ +pending+ +finalized+ false}
-                                                 (not (nil? version)) (merge {+version+ version})))]
-    (utils/tx-assert (not (empty? result)) "Unexpected null tx item after committing" :state state :txid txid)
+  (with-updating-tx-map-on-success [:transformer tx-item->tx]
+    (let [version (get-in @tx-map [txid +version+])
+          result (dl/update-item @tx-table-name {+txid+ txid}
+                                 {+state+ [:put state] +date+ [:put (get-current-time)]}
+                                 :return :all-new
+                                 :expected (cond-> {+state+ +pending+ +finalized+ false}
+                                                   (not (nil? version)) (merge {+version+ version})))]
+      (utils/tx-assert result "Unexpected null tx item after committing" :state state :txid txid)
 
-    result))
+      result)))
 
-(defn- transaction-completed? [tx-item]
-  (let [finalized? (contains? tx-item +finalized+)
-        state (+state+ tx-item)]
+(defn- transaction-completed? [txid]
+  (let [tx (txid->tx txid)
+        finalized? (contains? tx +finalized+)
+        state (+state+ tx)]
     (when finalized?
       (utils/tx-assert (contains? #{+committed+ +rolled-back+} state)
-                       "Unexpected terminal state for completed tx" :state state :tx-item tx-item))
+                       "Unexpected terminal state for completed tx" :state state :tx tx))
     finalized?))
 
-(defn- add-request-map-to-current-tx [tx-item request-atom]
+(defn- update-tx-request-map [tx-item-from-db request]
   ;; request-map = {:table1 {prim-k1 v1} ...}
-  (let [kvs (prim-kvs @request-atom)
-        {:keys [table op]} @request-atom
-        map (or (:requests-map @*current-tx*) {})]
+  (let [kvs (prim-kvs request)
+        {:keys [table op]} request]
     (let [{existing-op :op} (get-in map [table kvs])]
       ;; write op always win
       ;; only first get op win when more one get op occurs
@@ -182,31 +231,28 @@
       (cond (or (nil? existing-op)
                 ;; overwrite
                 (and (= existing-op :get-item) (not= op :get-item)))
-            (do
-              ;; everything's fine. So update version and requests-map
-              (swap! request-atom assoc :version (+version+ tx-item))
-              (swap! *current-tx* assoc-in [:requests-map table kvs] @request-atom))
+            (update-tx-map! (tx-item->tx tx-item-from-db) ;; copy tx attributes
+                            {[:requests-map table kvs :version] (+version+ tx-item-from-db)})
 
             (and (not= existing-op :get-item) (not= op :get-item))
             (utils/error "An existing request other than :get-item found!"
-                         {:type :duplicate-request :txid (+txid+ tx-item) :table table :prim-kvs kvs})))))
+                         {:type :duplicate-request :tx-item tx-item-from-db :request request})))))
 
-(defn- add-request-to-tx-item [tx-item request-atom]
-  (let [current-version (+version+ tx-item)]
+(defn- update-tx-with-request [txid request]
+  (let [tx (txid->tx txid)
+        current-version (+version+ tx)]
     (try (let [new-tx-item (dl/update-item @tx-table-name
-                                         {+txid+ (+txid+ tx-item)}
-                                         {+requests+   [:add #{@request-atom}]
-                                          +version+    [:add 1]
-                                          +date+       [:put (get-current-time)]}
-                                         :expected     {+state+ +pending+ +version+ current-version}
-                                         :return :all-new)
+                                           {+txid+ txid}
+                                           {+requests+   [:add #{request}]
+                                            +version+    [:add 1]
+                                            +date+       [:put (get-current-time)]}
+                                           :expected     {+state+ +pending+ +version+ current-version}
+                                           :return :all-new)
                new-version (get new-tx-item +version+)]
-
            ;; tx-item update is successful. Now update request-map, request version, etc
-           (add-request-map-to-current-tx tx-item request-atom) ;; yes this uses current-version
-           ;; update *current-tx* as well
-           (swap! *current-tx* assoc :tx-item new-tx-item)
+           ;; update-tx-request-map updates tx-map
            (utils/tx-assert (= new-version (inc current-version)) "Unexpected version number from update result")
+           (update-tx-request-map new-tx-item request)
            new-tx-item)
          (catch AmazonServiceException e
            (utils/error "Unexpected AmazonServiceException. Updating failed" {:type :amazon-service-error :error e})))))
@@ -221,11 +267,12 @@
                   (utils/tx-assert (not (and (not (empty? item)) (= (get item +txid+) txid) (contains? item +applied+)))
                                    "Item should not have been applied. Unable to release lock item" item)))))))
 
-
 (defmulti unlock-item-after-commit-using-op :op)
 
 (defn- %put-or-update-request-unlock [txid req]
-  (dl/update-item (:table req) (prim-kvs req) {+txid+ [:delete] +transient+ [:delete] +applied+ [:delete] +date+ [:delete]}
+  ;; after put or update, item still exists - just remove TX attributes
+  (dl/update-item (:table req) (prim-kvs req)
+                  {+txid+ [:delete] +transient+ [:delete] +applied+ [:delete] +date+ [:delete]}
                   :expected {+txid+ txid}))
 
 (defmethod unlock-item-after-commit-using-op :update-item [req txid]
@@ -235,6 +282,7 @@
   (%put-or-update-request-unlock txid req))
 
 (defmethod unlock-item-after-commit-using-op :delete-item [req txid]
+  ;; delete is delete
   (dl/delete-item (:table req) (prim-kvs req) :expected {+txid+ txid}))
 
 (defmethod unlock-item-after-commit-using-op :get-item [req txid]
@@ -244,21 +292,30 @@
   (try (unlock-item-after-commit-using-op req txid)
        (catch ConditionalCheckFailedException _)))
 
-(defn- delete-item-image [tx-item version]
-  (dl/delete-item @image-table-name {+image-id+ (str (+txid+ tx-item) "#" version)}))
+(defn- delete-item-image [txid version]
+  (dl/delete-item @image-table-name {+image-id+ (str txid "#" version)}))
 
-(defn- finalize-transaction [tx-item expected-current-state]
+(defn- finalize-transaction [txid expected-current-state]
   (utils/tx-assert (contains? #{+committed+ +rolled-back+} expected-current-state))
   (let [txid (+txid+ tx-item)]
     (try (dl/update-item @tx-table-name {+txid+ txid} {+finalized+ [:put true] +date+ [:put (get-current-time)]}
                          :expected {+state+ expected-current-state})
          (catch ConditionalCheckFailedException _
            (try (let [tx-item (get-tx-item txid)]
-                  (when-not (transaction-completed? tx-item)
+                  (when-not (transaction-completed? txid)
                     (utils/error "Expected the transaction to be completed (no item), but there was one."))
                   tx-item)
                 (catch ExceptionInfo e (when (not= (:type (ex-data e)) :transaction-not-found)
                                          (utils/error e))))))))
+
+
+;;;;;;;;;;;;;;;;;;;;
+
+
+
+
+
+
 
 (defn- get-requests-from-tx
   ([]   (get-requests-from-tx *current-tx*))
@@ -460,7 +517,7 @@
               item item
               :else
               (do (ensure-grabbing-all-locks tx)
-                  (let [item (try (add-request-to-tx-item tx-item request-atom) ;; This call ADDS a VERSION to the request
+                  (let [item (try (update-tx-with-request tx-item request-atom) ;; This call ADDS a VERSION to the request
                                   (catch ConditionalCheckFailedException _
                                     ;; TX changed unexpectedly. Check its state
                                     (let [current-state (get (get-tx-item txid) +state+)]
@@ -483,10 +540,12 @@
                                (utils/error "The transaction already rolled back"
                                             {:type :transaction-rolled-back :txid txid}))
         +pending+          nil
-        (utils/error "Unexpected state(add-request-to-tx-item)" {:type :unknown-completed-transaction :state (+state+ tx-item)}))
+        (utils/error "Unexpected state(update-tx-with-request)" {:type :unknown-completed-transaction :state (+state+ tx-item)}))
       (let [final-item (apply-and-keep-lock @request-atom item)]
         (when-not (nil? (:version request))
-          (swap! tx assoc :fully-applied-request-versions (conj (:fully-applied-request-versions @tx) (:version request))))
+          ;; FIXME: new ref & alter
+          (dosync (alter tx-map update-in [txid :fully-applied-request-versions] conj (:version request)))
+   ;;       (swap! tx assoc :fully-applied-request-versions (conj (:fully-applied-request-versions @tx) (:version request))))
         final-item))))
 
 (defn- stirp-special-attributes [item]
@@ -737,3 +796,7 @@
              (sweep t1 0 0)
              (delete t1)))
       (put-item :tx-ex {:id "conflictingTransactions_Item3" :which-transaction? :t2-win!}))))
+
+#_
+(update-tx-map! {:requests-map {}, :fully-applied-request-versions #{}, :_TxId "af9d7060-8b41-4243-a488-a82e7b8bbf02", :_TxS "P", :_TxV 1, :_TxD 1403150833}
+                {[:requests-map :test-table [:id "val"] :version] 10})
