@@ -311,34 +311,24 @@
                   (catch ExceptionInfo e (when (not= (:type (ex-data e)) :transaction-not-found)
                                            (utils/error e)))))))))
 
-
-;;;;;;;;;;;;;;;;;;;;
-
-
-
-
-
-
-
-(defn- get-requests-from-tx
-  ([]   (get-requests-from-tx *current-tx*))
-  ([tx] (mapcat (fn [[_ map]] (vals map)) (:requests-map @tx))))
-
-(defn- post-commit-cleanup [tx-item] ;; doCommit
-  (let [state (+state+ tx-item)
-        requests (get-requests-from-tx)]
+(defn- post-commit-cleanup [txid] ;; doCommit
+  (let [tx-item (txid->tx txid)
+        state   (+state+ tx-item)
+        txid    (+txid+ tx-item)
+        requests (get-tx-requests txid)]
     (utils/tx-assert (= state +committed+)
                      "Unexpected state instead of COMMITTED" :state state :tx-item tx-item)
     (doseq [request requests]
-      (unlock-item-after-commit (+txid+ tx-item) request))
+      (unlock-item-after-commit txid request))
 
     (doseq [request requests]
-      (delete-item-image tx-item (:version request)))
+      (delete-item-image txid (:version request)))
 
-    (finalize-transaction tx-item +committed+)))
+    (finalize-transaction txid +committed+)))
 
-(defn- rollback-item-and-release-lock [tx-item request]
-  (let [expected (select-keys tx-item [+txid+])
+
+(defn- rollback-item-and-release-lock [txid request]
+  (let [expected {+txid+ txid}
         put-or-update-op (fn []
                            (dl/update-item (:table request) (prim-kvs request)
                                            {+txid+ [:delete] +transient+ [:delete] +applied+ [:delete] +date+ [:delete]}
@@ -346,18 +336,25 @@
     (try (case (:op request)
            :put-item    (put-or-update-op)
            :update-item (put-or-update-op)
-           :delete-item (dl/delete-item @tx-table-name (prim-kvs request) :expected expected)
-           :get-item    (release-read-lock (+txid+ tx-item) (:table request) (prim-kvs request)))
+           :delete-item (dl/delete-item (:table request) (prim-kvs request) :expected expected)
+           :get-item    (release-read-lock txid (:table request) (prim-kvs request)))
          (catch ConditionalCheckFailedException _))))
 
-(defn- post-rollback-cleanup [tx-item]
-  (utils/tx-assert (= (+state+ tx-item) +rolled-back+)
-                   "Transaction state is not ROLLED_BACK" :state (+state+ tx-item) :tx-item tx-item)
-  (doseq [request (get-requests-from-tx)]
-    (rollback-item-and-release-lock tx-item request)
-    (delete-item-image tx-item (:version request)))
 
-  (finalize-transaction tx-item +rolled-back+))
+(defn- post-rollback-cleanup [txid]
+  (let [tx-item (txid->tx txid)]
+    (utils/tx-assert (= (+state+ tx-item) +rolled-back+)
+                     "Transaction state is not ROLLED_BACK" :state (+state+ tx-item) :tx-item tx-item)
+    (doseq [request (get-tx-requests txid)]
+      (rollback-item-and-release-lock txid request)
+      (delete-item-image txid (:version request)))
+    (finalize-transaction txid +rolled-back+)))
+
+;;;;;;;;;;;;;;;;;;;;
+
+
+
+
 
 (defn- rollback-using-txid [txid] ;; rollback
   (let [tx-item (try (mark-committed-or-rolled-back txid +rolled-back+)
@@ -372,7 +369,7 @@
                               (utils/error "Suddenly the transaction completed during ROLLED_BACK!"
                                        {:type :unknown-completed-transaction :txid txid})))))]
     (condp = (+state+ tx-item)
-      +committed+ (do (when-not (transaction-completed? tx-item) (post-commit-cleanup tx-item))
+      +committed+ (do (when-not (transaction-completed? tx-item) (post-commit-cleanup txid))
                       (utils/error "Transaction commited (instead of rolled-back)"
                                {:type :transaction-committed :txid txid}))
       +rolled-back+ (when-not (transaction-completed? tx-item) (post-rollback-cleanup tx-item))
@@ -417,7 +414,7 @@
 (declare add-request-to-transaction)
 (defn- ensure-grabbing-all-locks [tx-atom]
   (let [fully-applied-request-versions (:fully-applied-request-versions @tx-atom)]
-    (doseq [request (get-requests-from-tx tx-atom)]
+    (doseq [request (get-tx-requests (+txid+ @tx-atom))]
       (when-not (contains? fully-applied-request-versions (:version request))
         (add-request-to-transaction tx-atom request true item-lock-acquire-attempts)))))
 
@@ -536,7 +533,7 @@
                          (release-read-lock (:table request) (prim-kvs request) txid)
                          (utils/error e)))]
       (condp = (+state+ tx-item)
-        +committed+        (do (post-commit-cleanup tx-item)
+        +committed+        (do (post-commit-cleanup txid)
                                (utils/error "The transaction already committed"
                                             {:type :transaction-commited :txid txid}))
         +rolled-back+      (do (post-rollback-cleanup tx-item)
@@ -701,7 +698,7 @@
                                      completed?   (utils/error (str "Unexpected state for transaction: "
                                                                     (+state+ tx-item)))
 
-                                     (= state +committed+) (do (post-commit-cleanup tx-item)
+                                     (= state +committed+) (do (post-commit-cleanup txid)
                                                                true)
 
                                      (= state +rolled-back+)
