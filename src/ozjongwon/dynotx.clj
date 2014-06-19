@@ -350,13 +350,7 @@
       (delete-item-image txid (:version request)))
     (finalize-transaction txid +rolled-back+)))
 
-;;;;;;;;;;;;;;;;;;;;
-
-
-
-
-
-(defn- rollback-using-txid [txid] ;; rollback
+(defn- rollback [txid] ;; rollback
   (let [tx-item (try (mark-committed-or-rolled-back txid +rolled-back+)
                      ;; (Maybe??)Fails when
                      ;; 1. it is not in PENDING state
@@ -377,6 +371,14 @@
 
     tx-item))
 
+;;;;;;;;;;;;;;;;;;;;
+
+
+
+
+
+
+
 (defn- lock-item [txid request item-expected? attempts]
   (let [key-map (prim-kvs request)
         {:keys [table]} request]
@@ -395,7 +397,7 @@
           lock-holder (get db-item +txid+)]
       (cond (empty? lock-holder) (recur txid request false (dec attempts))
             (= lock-holder txid) db-item
-            (> attempts 1) (do (try (rollback-using-txid lock-holder)
+            (> attempts 1) (do (try (rollback lock-holder)
                                     (catch ExceptionInfo ex
                                       (case (:type (ex-data ex))
                                         :transaction-completed nil
@@ -565,7 +567,7 @@
                            (catch clojure.lang.ExceptionInfo e
                              (when (> i 1) ;; avoid unnecessary rollback
                                (if-let [other-txid (:txid (ex-data e))]
-                                 (utils/ignore-errors (rollback-using-txid other-txid))
+                                 (utils/ignore-errors (rollback other-txid))
                                  (utils/error e)))
                              [nil e]))]
         (if ex
@@ -654,7 +656,7 @@
       (delete tx-item delete-timeout)
       (let [state (+state+ tx-item)
             rollback-fn (fn []
-                          (try (rollback-using-txid (:txid tx))
+                          (try (rollback (:txid tx))
                                (catch ExceptionInfo e
                                  (when-not (= (type (ex-data e)) :transaction-completed)
                                    (utils/error e)))))]
