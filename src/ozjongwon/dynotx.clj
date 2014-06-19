@@ -297,16 +297,19 @@
 
 (defn- finalize-transaction [txid expected-current-state]
   (utils/tx-assert (contains? #{+committed+ +rolled-back+} expected-current-state))
-  (let [txid (+txid+ tx-item)]
-    (try (dl/update-item @tx-table-name {+txid+ txid} {+finalized+ [:put true] +date+ [:put (get-current-time)]}
-                         :expected {+state+ expected-current-state})
-         (catch ConditionalCheckFailedException _
-           (try (let [tx-item (get-tx-item txid)]
-                  (when-not (transaction-completed? txid)
-                    (utils/error "Expected the transaction to be completed (no item), but there was one."))
-                  tx-item)
-                (catch ExceptionInfo e (when (not= (:type (ex-data e)) :transaction-not-found)
-                                         (utils/error e))))))))
+  (let [now (get-current-time)]
+    (with-updating-tx-map-on-success []
+      (try (do (dl/update-item @tx-table-name {+txid+ txid} {+finalized+ [:put true] +date+ [:put now]}
+                               :expected {+state+ expected-current-state})
+               ;; hand craft tx-item (update-item returns nothing)
+               (merge (txid->tx txid) {+finalized+ true +date+ now}))
+           (catch ConditionalCheckFailedException _
+             (try (let [tx-item (get-tx-item txid)]
+                    (when-not (transaction-completed? txid)
+                      (utils/error "Expected the transaction to be completed (no item), but there was one."))
+                    tx-item)
+                  (catch ExceptionInfo e (when (not= (:type (ex-data e)) :transaction-not-found)
+                                           (utils/error e)))))))))
 
 
 ;;;;;;;;;;;;;;;;;;;;
