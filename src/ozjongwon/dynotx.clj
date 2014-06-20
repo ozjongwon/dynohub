@@ -55,7 +55,7 @@
 ;;;
 ;;; Transaction-Item
 ;;;
-(def ^:dynamic *current-tx*)
+;; (def ^:dynamic *current-tx*) ;; FIXME: remove??
 
 ;; constants
 (def ^:private ^:constant item-lock-acquire-attempts 3)
@@ -144,6 +144,10 @@
 (defn- get-tx-requests [txid]
   (mapcat (fn [[_ map]] (vals map)) (:requests-map (txid->tx txid))))
 
+(defn- request-version [txid request]
+  (get-in (txid->tx txid)
+          [:requests-map (:table request) (prim-kvs request) :version]))
+
 (defn- insert-and-return-tx-item
   "Insert a new transaction item with txid into transaction table"
   [txid]
@@ -199,7 +203,8 @@
 ;;; Transaction logic
 ;;;
 (defn- mark-committed-or-rolled-back [txid state]
-  (utils/tx-assert (contains? #{+committed+ +rolled-back+} state) "Unexpected state in (mark-committed-or-rolled-back)" state :txid txid)
+  (utils/tx-assert (contains? #{+committed+ +rolled-back+} state)
+                   "Unexpected state in (mark-committed-or-rolled-back)" state :txid txid)
   (with-updating-tx-map-on-success [:transformer tx-item->tx]
     (let [version (get-in @tx-map [txid +version+])
           result (dl/update-item @tx-table-name {+txid+ txid}
@@ -238,7 +243,7 @@
             (utils/error "An existing request other than :get-item found!"
                          {:type :duplicate-request :tx-item tx-item-from-db :request request})))))
 
-(defn- update-tx-with-request [txid request]
+(defn- update-tx-item [txid request]
   (let [tx (txid->tx txid)
         current-version (+version+ tx)]
     (try (let [new-tx-item (dl/update-item @tx-table-name
@@ -363,69 +368,81 @@
                               (utils/error "Suddenly the transaction completed during ROLLED_BACK!"
                                        {:type :unknown-completed-transaction :txid txid})))))]
     (condp = (+state+ tx-item)
-      +committed+ (do (when-not (transaction-completed? tx-item) (post-commit-cleanup txid))
+      +committed+ (do (when-not (transaction-completed? txid) (post-commit-cleanup txid))
                       (utils/error "Transaction commited (instead of rolled-back)"
                                {:type :transaction-committed :txid txid}))
-      +rolled-back+ (when-not (transaction-completed? tx-item) (post-rollback-cleanup tx-item))
+      +rolled-back+ (when-not (transaction-completed? txid) (post-rollback-cleanup txid))
       (utils/tx-assert false "Unexpected state in (rollback-tx tx)" :state (+state+ tx-item) :txid txid))
+    nil))
 
-    tx-item))
-
-;;;;;;;;;;;;;;;;;;;;
-
-
-
-
-
-
-
-(defn- lock-item [txid request item-expected? attempts]
+(defn- lock-item [txid request]
   (let [key-map (prim-kvs request)
-        {:keys [table]} request]
-    (when (<= attempts 0)
-      (utils/error "Unable to acquire item lock" {:type :transaction-exception :keys key-map}))
-    (let [expected (cond-> {+txid+ false}
-                           item-expected? (merge key-map))
-          update-map (cond-> {+txid+ [:put txid] +date+ [:put (get-current-time)]}
-                             (not item-expected?) (merge {+transient+ [:put true]}))
-          db-item (try (dl/update-item table key-map update-map :expected expected :return :all-new)
-                       ;; ConditionalCheckFailedException means:
-                       ;; 1. +txid+ has a value already (lock-holder is this txid or else)
-                       ;; 2. item is not there yet
-                       (catch ConditionalCheckFailedException _
-                         (dl/get-item table key-map :consistent? true)))
-          lock-holder (get db-item +txid+)]
-      (cond (empty? lock-holder) (recur txid request false (dec attempts))
-            (= lock-holder txid) db-item
-            (> attempts 1) (do (try (rollback lock-holder)
-                                    (catch ExceptionInfo ex
-                                      (case (:type (ex-data ex))
-                                        :transaction-completed nil
-                                        :transaction-not-found (release-read-lock lock-holder table key-map)
-                                        (utils/error ex))))
-                               ;; FIXME: check false??
-                               ;; i.e., above rollback or release-read-lock
-                               ;; successfully delete the item,
-                               ;; item-expected? should be false!
-                               (recur txid request true (dec attempts)))
-            ;; i.e., attempts = 1
-            :else (utils/error "Cannot grab a lock"
-                               {:type :item-not-locked-exception :txid txid :lock-holder lock-holder
-                                :table table :key key-map})))))
+        {:keys [table]} request
+        expect-exist-map {true {:expected (merge {+txid+ false} key-map)
+                                :update-map {+txid+ [:put txid] +date+ [:put (get-current-time)]}}
+                          false {:expected {+txid+ false}
+                                 :update-map {+txid+ [:put txid]
+                                              +date+ [:put (get-current-time)]
+                                              +transient+ [:put true]}}}]
+    (loop [attempts item-lock-acquire-attempts expect-exist? true]
+      (if (<= attempts 0)
+        (utils/error "Unable to acquire item lock" {:type :transaction-exception :keys key-map})
+        (let [[expected update-map] (get expect-exist-map expect-exist?)
+              db-item (try (dl/update-item table key-map update-map :expected expected :return :all-new)
+                           ;; 1. +txid+ has a value already
+                           ;; 2. item is not there yet
+                           (catch ConditionalCheckFailedException _
+                             (dl/get-item table key-map :consistent? true)))
+              lock-holder (get db-item +txid+)]
+          (cond (nil? lock-holder) ;; no lock found, try it again with 'new item' + 'transient'
+                (recur (dec attempts) false)
+
+                (= lock-holder txid) db-item ;; success!
+                ;; lock-holder is not this transaction. Try to steal the lock from the lock-holder
+                :else (do (when (> attempts 1)
+                            (try (rollback lock-holder)
+                                 (catch ExceptionInfo ex
+                                   (case (:type (ex-data ex))
+                                     :transaction-completed nil
+                                     :transaction-not-found (release-read-lock lock-holder table key-map)
+                                     (utils/error ex)))))
+                          (recur (dec attempts) true))))))))
 
 (declare add-request-to-transaction)
-(defn- ensure-grabbing-all-locks [tx-atom]
-  (let [fully-applied-request-versions (:fully-applied-request-versions @tx-atom)]
-    (doseq [request (get-tx-requests (+txid+ @tx-atom))]
+(defn- ensure-prerequisite-locks [txid]
+  (let [fully-applied-request-versions (fully-applied-request-versions txid)]
+    (doseq [request (get-tx-requests txid)]
       (when-not (contains? fully-applied-request-versions (:version request))
-        (add-request-to-transaction tx-atom request true item-lock-acquire-attempts)))))
+        (add-request-to-transaction txid request true item-lock-acquire-attempts)))))
+
+(defn- ensure-grabbing-all-locks [txid request]
+  (loop [i tx-lock-acquire-attempts tx-item nil]
+    (cond (<= i 0)
+          (utils/error "Unable to add request to transaction - too much contention for the tx record"
+                       {:type :transaction-exception :txid txid})
+          tx-item tx-item
+
+          :else
+          (do (ensure-prerequisite-locks txid)
+              (let [tx-item (try (update-tx-item txid request)
+                              (catch ConditionalCheckFailedException _
+                                ;; TX changed unexpectedly. Check its state
+                                (let [current-state (get (get-tx-item txid) +state+)]
+                                  (when (not= current-state +pending+)
+                                    (utils/error "Attempted to add a request to a transaction that was not in PENDING state "
+                                                 {:type :transaction-not-in-pending-state :txid txid})))))]
+                ;; 'tx-item' is nil when there is a version number mismatch
+                ;; if that is the case, loop again
+                (recur (dec i) tx-item))))))
 
 (defn- save-item-image [request item]
   (when-not (or (= (:op request) :get-item) (contains? item +applied+) (contains? item +transient+))
     ;;(utils/tx-assert (= (get item +txid+) (:txid request)) "This will never happen in the real world!")
     ;;(utils/tx-assert (nil? (get item +image-id+)) "This will never happen in the real world!")
-    (let [image-id (str (+txid+ item) "#" (:version request))]
-      (try (dl/put-item @image-table-name (merge item {+image-id+ image-id +txid+ (+txid+ item)}) :expected {+image-id+ false})
+    (let [txid (+txid+ item)
+          image-id (str (+txid+ item) "#" (request-version txid request))]
+      (try (dl/put-item @image-table-name (merge item {+image-id+ image-id +txid+ txid})
+                        :expected {+image-id+ false})
            ;; Already exists! Ignore!
            (catch ConditionalCheckFailedException _)))))
 
@@ -436,6 +453,7 @@
          (merge (assoc (:item request) +applied+ true)
                 (select-keys locked-item [+txid+ +date+ +transient+]))
          :expected {+txid+ (get locked-item +txid+) +applied+ false}
+         ;; FIXME: below opts
          (utils/hash-map->list (:opts request))))
 
 (defmethod apply-request-op :update-item [request locked-item]
@@ -444,32 +462,34 @@
          (prim-kvs request)
          (assoc (:update-map request) +applied+ [:put true])
          :expected {+txid+ (get locked-item +txid+) +applied+ false}
+         ;; FIXME: below opts
          (utils/hash-map->list (:opts request))))
 
 (defmethod apply-request-op :default [_ _]
   ;; noop for delete-item and get-item
   nil)
 
-(defn- load-item-image [version]
-  (dissoc (dl/get-item @image-table-name {+image-id+ (str (get *current-tx* +txid+) "#" version)} :consistent? true)
+(defn- load-item-image [txid version]
+  ;; get the old item of the given  version
+  (dissoc (dl/get-item @image-table-name {+image-id+ (str txid "#" version)} :consistent? true)
           +image-id+))
 
 (defn- compute-item-put-or-update [request applied-item locked-item return]
   (case return
     :all-old (or applied-item
-                 (load-item-image (:version request))
+                 (load-item-image (+txid+ locked-item) (request-version (+txid+ locked-item) request))
                  (utils/error "Transaction must have completed since the old copy of the image is missing"
                               {:type :unknown-completed-transaction :txid (get locked-item +txid+)}))
     :all-new (or applied-item
-                 (let [applied-item (dl/get-item (:table request) (prim-kvs request))]
-                   (if applied-item
-                     (if (= (get locked-item +txid+) (get applied-item +txid+))
-                       applied-item
-                       (utils/error "Transaction IDs mismatched"
-                                    {:type :item-not-locked :table (:table request) :expected locked-item :get applied-item}))
-                     (utils/error "Transaction must have completed since the item no longer exists"
-                                  {:type :unknown-completed-transaction :txid (get locked-item +txid+)}))))
-    nil))
+                 (if-let [applied-item (dl/get-item (:table request) (prim-kvs request))]
+                   (if (= (+txid+ applied-item) (+txid+ locked-item))
+                     applied-item
+                     (utils/error "Transaction IDs mismatched"
+                                  {:type :item-not-locked :table (:table request)
+                                   :expected locked-item :get applied-item}))
+                   (utils/error "Transaction must have completed since the item no longer exists"
+                                {:type :unknown-completed-transaction :txid (get locked-item +txid+)})))
+    (utils/tx-assert (= return :none) "Unsupported return values: " return)))
 
 (defmulti item-with-proper-return-value (fn [r _ _ _ _]
                                           (:op r)))
@@ -486,7 +506,8 @@
     locked-item))
 
 (defmethod item-with-proper-return-value :get-item [request _ locked-item transient-item? _]
-  (let [locking-request-op (get-in (:requests-map @*current-tx*) [(:table request) (prim-kvs request)])]
+  (let [locking-request-op (get-in (:requests-map (txid->tx (+txid+ locked-item)))
+                                   [(:table request) (prim-kvs request)])]
     ;; No item for deleted item & repeated get-item on a transient item
     (when-not (or (= locking-request-op :delete-item)
                   (and (= locking-request-op :get-item) transient-item?))
@@ -505,31 +526,13 @@
       (when-not (and (= return :all-old) transient-item?)
         (item-with-proper-return-value request applied-item locked-item transient-item? return)))))
 
-(defn- add-request-to-transaction [tx request fight-for-a-lock? num-lock-acquire-attempts]
-  (let [tx-item (:tx-item @tx)
-        txid (+txid+ tx-item)
-        request-atom (atom request)]
-    (if fight-for-a-lock?
-      (utils/tx-assert (= (+state+ tx-item) +pending+)
-                       "To fight for a lock, TX must be in pending state" :state (+state+ tx-item))
-      (loop [i num-lock-acquire-attempts item nil]
-        (cond (<= i 0)
-              (utils/error "Unable to add request to transaction - too much contention for the tx record"
-                           {:type :transaction-exception :txid txid})
-              item item
-              :else
-              (do (ensure-grabbing-all-locks tx)
-                  (let [item (try (update-tx-with-request tx-item request-atom) ;; This call ADDS a VERSION to the request
-                                  (catch ConditionalCheckFailedException _
-                                    ;; TX changed unexpectedly. Check its state
-                                    (let [current-state (get (get-tx-item txid) +state+)]
-                                      (when (not= current-state +pending+)
-                                        (utils/error "Attempted to add a request to a transaction that was not in PENDING state "
-                                                     {:type :transaction-not-in-pending-state :txid txid})))))]
-                    (recur (dec i) item))))))
+(defn- add-request-to-transaction [txid request]
+  (let [tx (txid->tx txid)]
+    (utils/tx-assert (= (+state+ tx) +pending+)
+                     "To fight for a lock, TX must be in pending state" :state (+state+ tx))
     ;; When the item locked, save it to the item image
-    (let [item  (lock-item txid @request-atom true item-lock-acquire-attempts)
-          _     (save-item-image @request-atom item)
+    (let [item  (lock-item txid request)
+          _     (save-item-image request item)
           tx-item (try (get-tx-item txid)
                        (catch ExceptionInfo e
                          (release-read-lock (:table request) (prim-kvs request) txid)
@@ -538,41 +541,41 @@
         +committed+        (do (post-commit-cleanup txid)
                                (utils/error "The transaction already committed"
                                             {:type :transaction-commited :txid txid}))
-        +rolled-back+      (do (post-rollback-cleanup tx-item)
+        +rolled-back+      (do (post-rollback-cleanup txid)
                                (utils/error "The transaction already rolled back"
                                             {:type :transaction-rolled-back :txid txid}))
         +pending+          nil
-        (utils/error "Unexpected state(update-tx-with-request)" {:type :unknown-completed-transaction :state (+state+ tx-item)}))
-      (let [final-item (apply-and-keep-lock @request-atom item)]
-        (when-not (nil? (:version request))
-          ;; FIXME: new ref & alter
-          (dosync (alter tx-map update-in [txid :fully-applied-request-versions] conj (:version request)))
-   ;;       (swap! tx assoc :fully-applied-request-versions (conj (:fully-applied-request-versions @tx) (:version request))))
+        (utils/error "Unexpected state(update-tx-item)" {:type :unknown-completed-transaction :state (+state+ tx-item)}))
+      (let [final-item (apply-and-keep-lock request item)]
+        (when-let [version (request-version txid request)]
+          (dosync (alter tx-map assoc-in [txid :fully-applied-request-versions]
+                         (conj (fully-applied-request-versions txid) version))))
         final-item))))
+
 
 (defn- stirp-special-attributes [item]
   (apply dissoc item special-attributes))
 
-(defn- attempt-to-add-request-to-tx [tx request]
+(defn- attempt-to-add-request-to-tx [txid request]
   ;;
   ;; Repeatedly try to add this request to the tx.
   ;; If it fails because the 'item' of the request is already in a different transaction,
   ;; tries to rollback the other transaction.
   ;;
-  (loop [i tx-lock-contention-resolution-attempts last-conflict nil]
+  (ensure-grabbing-all-locks txid request tx-lock-acquire-attempts)
+
+  (loop [i tx-lock-contention-resolution-attempts]
     (if (<= i 0)
-      (utils/error last-conflict)
-      (let [[item ex] (try [(add-request-to-transaction tx request (< i tx-lock-contention-resolution-attempts) tx-lock-acquire-attempts)
-                            nil]
-                           (catch clojure.lang.ExceptionInfo e
-                             (when (> i 1) ;; avoid unnecessary rollback
-                               (if-let [other-txid (:txid (ex-data e))]
-                                 (utils/ignore-errors (rollback other-txid))
-                                 (utils/error e)))
-                             [nil e]))]
-        (if ex
-          (recur (dec i) ex)
-          (stirp-special-attributes item))))))
+      (utils/error "Could not add request to transaction"
+                   {:type :transaction-exception :txid txid :request request})
+      (if-let [item (try (add-request-to-transaction txid request)
+                         (catch clojure.lang.ExceptionInfo e
+                           (when (> i 1) ;; avoid unnecessary rollback
+                             (if-let [other-txid (:txid (ex-data e))]
+                               (utils/ignore-errors (rollback other-txid))
+                               (utils/error e)))))]
+        (stirp-special-attributes item)
+        (recur (dec i))))))
 
 (defn- validate-special-attributes-exclusion [attributes]
   (when (some #(contains? special-attributes %) attributes)
@@ -600,6 +603,7 @@
   [(apply dl/ensure-table @tx-table-name [+txid+ :s] opts)
    (apply dl/ensure-table @image-table-name [+image-id+ :s] opts)])
 
+#_
 (defmacro with-transaction [[& tx] & body]
   (if tx
     `(let [~@tx (atom (new-transaction))]
@@ -611,112 +615,103 @@
          (delete @*current-tx*)
          result#))))
 
-(defn item-locked? [item]
-  (contains? item +txid+))
-
-(defn item-applied? [item]
-  (contains? item +applied+))
-
-
-(defn is-transient [item]
-  (contains? item +transient+))
-
 (defn- delete-tx-item [txid]
   (dl/delete-item @tx-table-name {+txid+ txid} :expected {+finalized+ true}))
 
 (defn delete
-  ([tx] (delete tx -1000))
-  ([tx timeout]
-     (letfn [(get-completed-tx-item [tx]
-               (let [tx-item (:tx-item tx)
-                     txid (:txid tx)]
-                 (when-not (transaction-completed? tx-item)
-                   (try (let [tx-item (get-tx-item txid)]
-                          (or (transaction-completed? tx-item)
-                              (utils/error "You can only delete a transaction that is completed"
-                                           {:type :transaction-exception :tx-item tx-item}))
-                          tx-item)
-                        (catch ExceptionInfo e
-                          (case (type e)
-                            :transaction-not-found nil ;; deleted
-                            (utils/error e)))))))]
-       (let [tx (if (instance? clojure.lang.Atom tx)
-                  @tx
-                  tx)]
-         (when-let [tx-item (get-completed-tx-item tx)]
-           (when (< (+ (+date+ tx-item) timeout) (get-current-time))
-             (delete-tx-item (:txid tx))))))))
+  ([txid] (delete txid -1000))
+  ([txid timeout]
+     (letfn [(get-completed-tx-item [txid]
+               (when-not (transaction-completed? txid)
+                 (try (let [tx-item (get-tx-item txid)]
+                        (or (transaction-completed? txid)
+                            (utils/error "You can only delete a transaction that is completed"
+                                         {:type :transaction-exception :tx-item tx-item}))
+                        tx-item)
+                      (catch ExceptionInfo e
+                        (case (type e)
+                          :transaction-not-found nil ;; deleted
+                          (utils/error e))))))]
+       (when-let [tx-item (get-completed-tx-item txid)]
+         (when (< (+ (+date+ tx-item) timeout) (get-current-time))
+           (delete-tx-item txid))))))
 
-(defn sweep [tx rollback-timeout delete-timeout]
-  (let [tx (if (instance? clojure.lang.Atom tx)
-                  @tx
-                  tx)
-        tx-item (:tx-item tx)]
-    (if (transaction-completed? tx-item)
-      (delete tx-item delete-timeout)
-      (let [state (+state+ tx-item)
-            rollback-fn (fn []
-                          (try (rollback (:txid tx))
-                               (catch ExceptionInfo e
-                                 (when-not (= (type (ex-data e)) :transaction-completed)
-                                   (utils/error e)))))]
-        (cond (= state +pending+)
-              (when (< (+ (+date+ tx-item) rollback-timeout) (get-current-time))
-                (rollback-fn))
+(defn sweep [txid rollback-timeout delete-timeout]
+  (if (transaction-completed? txid)
+    (delete txid delete-timeout)
+    (let [tx (txid->tx txid)
+          state (+state+ tx)
+          rollback-fn (fn []
+                        (try (rollback txid)
+                             (catch ExceptionInfo e
+                               (when-not (= (type (ex-data e)) :transaction-completed)
+                                 (utils/error e)))))]
+      (cond (= state +pending+)
+            (when (< (+ (+date+ tx) rollback-timeout) (get-current-time))
+              (rollback-fn))
 
-              (or (= state +committed+) (= state +rolled-back+))
-              (try (rollback-fn)
-                   (catch ExceptionInfo e
-                     (when-not (:type (ex-data e) :transaction-completed)
-                       (utils/error e))))
-
-              :else
-              (utils/error (str "Unexpected state in transaction: " state)))))))
-
-(defn commit [tx-atom] ;; commit
-  (let [txid (:txid @tx-atom)]
-    (loop [i item-commit-attempts success? false]
-      (cond success? :success
-
-            (<= i 0) (utils/error (str "Unable to commit transaction after " (inc item-commit-attempts) " attempts")
-                                  {:type :transaction-exception :txid txid})
+            (or (= state +committed+) (= state +rolled-back+))
+            (try (rollback-fn)
+                 (catch ExceptionInfo e
+                   (when-not (:type (ex-data e) :transaction-completed)
+                     (utils/error e))))
 
             :else
-            (let [tx-item (try (get-tx-item txid)
-                               (catch ExceptionInfo e
-                                 (if (= (type (ex-data e)) :transaction-not-found)
-                                   (utils/error "In transaction 'commited' attempt, transaction either rolled back or committed"
-                                                {:type :unknown-completed-transaction :txid txid})
-                                   (utils/error e))))]
+            (utils/error (str "Unexpected state in transaction: " state))))))
 
-              (let [completed? (transaction-completed? tx-item)
-                    state      (+state+ tx-item)
-                    success?   (cond (and completed? (= state +committed+)) true
+(defn commit [txid]
+  (loop [i item-commit-attempts success? false]
+    (cond success? nil
 
-                                     (and completed? (= state +rolled-back+))
+          (<= i 0) (utils/error (str "Unable to commit transaction after " item-commit-attempts " attempts")
+                                {:type :transaction-exception :txid txid})
+          :else
+          (let [tx-item (try (get-tx-item txid)
+                             (catch ExceptionInfo e
+                               (if (= (type (ex-data e)) :transaction-not-found)
+                                 (utils/error "In transaction 'commited' attempt, transaction either rolled back or committed"
+                                              {:type :unknown-completed-transaction :txid txid})
+                                 (utils/error e))))
+                completed? (transaction-completed? txid)
+                state      (+state+ tx-item)
+                success?   (cond (and completed? (= state +committed+)) true
+
+                                 (and completed? (= state +rolled-back+))
+                                 (utils/error "Transaction was rolled back"
+                                              {:type :transaction-rolled-back :txid txid})
+
+                                 completed?   (utils/error (str "Unexpected state for transaction: "
+                                                                (+state+ tx-item)))
+
+                                 (= state +committed+) (do (post-commit-cleanup txid)
+                                                           true)
+
+                                 (= state +rolled-back+)
+                                 (do (post-rollback-cleanup txid)
                                      (utils/error "Transaction was rolled back"
-                                                  {:type :transaction-rolled-back :txid txid})
+                                                  {:type :transaction-rolled-back :txid txid}))
+                                 :else false)]
+            (ensure-grabbing-all-locks txid)
+            (try (mark-committed-or-rolled-back txid +committed+)
+                 (catch ConditionalCheckFailedException _ false))
+            (recur (dec i) success?)))))
 
-                                     completed?   (utils/error (str "Unexpected state for transaction: "
-                                                                    (+state+ tx-item)))
+(defn- make-request [& {:keys [op table prim-kvs opts item update-map opts]}]
+  (let [opts (and opts (dissoc opts :txid))]
+    (cond-> {:op op :table table}
+          prim-kvs              (assoc :prim-kvs prim-kvs)
+          item                  (assoc :item item)
+          update-map            (assoc :update-map update-map)
+          (not (empty? opts))   (assoc :opts opts))))
 
-                                     (= state +committed+) (do (post-commit-cleanup txid)
-                                                               true)
-
-                                     (= state +rolled-back+)
-                                     (do (post-rollback-cleanup tx-item)
-                                         (utils/error "Transaction was rolled back"
-                                                      {:type :transaction-rolled-back :txid txid}))
-                                     :else false)]
-                (ensure-grabbing-all-locks tx-atom)
-                (try (mark-committed-or-rolled-back txid +committed+)
-                     (catch ConditionalCheckFailedException _ false))
-                (recur (dec i) success?)))))))
-
-(defn get-item [table prim-kvs & opts]
+(defn get-item [table prim-kvs & {:keys [attrs consistent? return-cc? txid]
+                                  :as opts}]
   (validate-special-attributes-exclusion (:keys prim-kvs))
-  (attempt-to-add-request-to-tx *current-tx* (cond-> {:op :get-item :table table :prim-kvs prim-kvs}
-                                                     opts (assoc :opts (apply hash-map opts)))))
+  (attempt-to-add-request-to-tx txid (make-request :op :get-item :table table :prim-kvs prim-kvs :opts opts)))
+
+(defn- change-item [txid attributes request]
+  (validate-write-item-arguments attributes (:opts request))
+  (attempt-to-add-request-to-tx txid request))
 
 (defn- get-item-uncommitted [table prim-kvs opts-map]
   (let [item (dl/get-item table prim-kvs opts-map)]
@@ -742,7 +737,7 @@
 
 ;;       (recur (dec i)))))
 
-
+#_
 (defn get-item-with-isolation-level [table prim-kvs isolation-level & opts]
   (let [opts-map (hash-map opts)
         opts-map+ (if (contains? opts-map :attr)
@@ -753,20 +748,30 @@
 ;;        :committed      (get-item-committed table prim-kvs opts-map+))))
         )))
 
+(defn- change-item [txid attributes request]
+  (validate-write-item-arguments attributes (:opts request))
+  (attempt-to-add-request-to-tx txid request))
 
-(defn- mutate-item [tx attributes request opts]
-  (let [opts (when opts (apply hash-map opts))]
-    (validate-write-item-arguments attributes opts)
-    (attempt-to-add-request-to-tx tx (cond-> request
-                                             opts (assoc :opts opts)))))
-(defn put-item [table item & opts]
-  (mutate-item *current-tx* item {:op :put-item :table table :item item :opts opts} opts))
+(defn put-item [table item & {:keys [return expected return-cc? txid]
+                              :or   {return :none}
+                              :as   opts}]
+  (change-item txid
+               item
+               (make-request :op :put-item :table table :item item :opts opts)))
 
-(defn update-item [table prim-kvs update-map & opts]
-  (mutate-item *current-tx* (merge prim-kvs update-map) {:op :update-item :table table :prim-kvs prim-kvs :update-map update-map} opts))
+(defn update-item [table prim-kvs update-map & {:keys [return expected return-cc? txid]
+                                                :or   {return :none}
+                                                :as   opts}]
+  (change-item txid
+               (merge prim-kvs update-map)
+               (make-request :op :update-item :table table :prim-kvs prim-kvs :update-map update-map :opts opts)))
 
-(defn delete-item [table prim-kvs & opts]
-  (mutate-item *current-tx* prim-kvs {:op :delete-item :table table :prim-kvs prim-kvs :opts opts} opts))
+(defn delete-item [table prim-kvs & {:keys [return expected return-cc? txid]
+                                     :or   {return :none}
+                                     :as   opts}]
+  (change-item txid
+               prim-kvs
+               (make-request :op :delete-item :table table :prim-kvs prim-kvs :opts opts)))
 
 ;;; DYNOTX.CLJ ends here
 
