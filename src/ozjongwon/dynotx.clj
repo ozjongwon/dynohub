@@ -112,7 +112,7 @@
 
 (defn- tx-item->tx [tx-item]
   (let [existing-tx (get @tx-map (+txid+ tx-item))]
-    (assoc existing-tx
+    (assoc tx-item
 
       :fully-applied-request-versions
       (:fully-applied-request-versions existing-tx)
@@ -124,11 +124,11 @@
   ([tx-item]
      (update-tx-map! tx-item nil))
   ([tx-item kv-map]
-     (println "***??? " kv-map)
      (let [txid (+txid+ tx-item)]
        (dosync (alter tx-map assoc txid tx-item)
                (doseq [[k v] kv-map]
                  (alter tx-map assoc-in `[~txid ~@k] v))))))
+
 
 (defmacro with-updating-tx-map-on-success [[& {:keys [transformer] :or {transformer 'identity}}] & body]
   `(let [tx-item# (do ~@body)]
@@ -144,6 +144,19 @@
 
 (defn- get-tx-requests [txid]
   (mapcat (fn [[_ map]] (vals map)) (:requests-map (txid->tx txid))))
+
+(defmulti prim-kvs :op)
+
+(defmethod prim-kvs :put-item [req]
+  (let [item (:item req)
+        table-keys (table-keys (:table req))
+        kvs  (select-keys item table-keys)]
+    (if (= (count kvs) (count table-keys))
+      kvs
+      (utils/error "Can't find required keys" {:type :application-error :keys (filter #(not (contains? kvs)) table-keys)}))))
+
+(defmethod prim-kvs :default [req]
+  (:prim-kvs req))
 
 (defn- request-version [txid request]
   (get-in (txid->tx txid)
@@ -184,21 +197,6 @@
 (defn- valid-return-value? [rv]
   (or (nil? rv) (contains? #{:all-old :all-new :none} rv)))
 
-(defmulti prim-kvs :op)
-
-(defmethod prim-kvs :put-item [req]
-  (let [item (:item req)
-        table-keys (table-keys (:table req))
-        kvs  (select-keys item table-keys)]
-    (if (= (count kvs) (count table-keys))
-      kvs
-      (utils/error "Can't find required keys" {:type :application-error :keys (filter #(not (contains? kvs)) table-keys)}))))
-
-(defmethod prim-kvs :default [req]
-  (:prim-kvs req))
-
-
-
 
 ;;;
 ;;; Transaction logic
@@ -226,9 +224,10 @@
                        "Unexpected terminal state for completed tx" :state state :tx tx))
     finalized?))
 
-(defn- update-tx-request-map [tx-item-from-db request]
+(defn- update-tx-request-map [txid request]
   ;; request-map = {:table1 {prim-k1 v1} ...}
-  (let [kvs (prim-kvs request)
+  (let [tx (txid->tx txid)
+        kvs (prim-kvs request)
         {:keys [table op]} request]
     (let [{existing-op :op} (get-in map [table kvs])]
       ;; write op always win
@@ -237,16 +236,17 @@
       (cond (or (nil? existing-op)
                 ;; overwrite
                 (and (= existing-op :get-item) (not= op :get-item)))
-            (update-tx-map! (tx-item->tx tx-item-from-db) ;; copy tx attributes
-                            {[:requests-map table kvs] (assoc request :version (+version+ tx-item-from-db))})
+            (let [version (+version+ tx)]
+              (update-tx-map! tx
+                              {[:requests-map table kvs] (assoc request :version version)}))
 
             (and (not= existing-op :get-item) (not= op :get-item))
             (utils/error "An existing request other than :get-item found!"
-                         {:type :duplicate-request :tx-item tx-item-from-db :request request})))))
+                         {:type :duplicate-request :tx tx :request request})))))
 
 (defn- update-tx-item [txid request]
-  (let [tx (txid->tx txid)
-        current-version (+version+ tx)]
+  (update-tx-request-map txid request)
+  (let [current-version (+version+ (txid->tx txid))]
     (try (let [new-tx-item (dl/update-item @tx-table-name
                                            {+txid+ txid}
                                            {+requests+   [:add #{request}]
@@ -257,8 +257,6 @@
                new-version (get new-tx-item +version+)]
            ;; tx-item update is successful. Now update request-map, request version, etc
            (utils/tx-assert (= new-version (inc current-version)) "Unexpected version number from update result")
-           ;; update-tx-request-map updates tx-map using current tx+request
-           (update-tx-request-map tx request)
            new-tx-item)
          (catch AmazonServiceException e
            (utils/error "Unexpected AmazonServiceException. Updating failed" {:type :amazon-service-error :error e})))))
