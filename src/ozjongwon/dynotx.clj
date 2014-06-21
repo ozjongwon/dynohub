@@ -303,7 +303,7 @@
 (defn- finalize-transaction [txid expected-current-state]
   (utils/tx-assert (contains? #{+committed+ +rolled-back+} expected-current-state))
   (let [now (get-current-time)]
-    (with-updating-tx-map-on-success []
+  (with-updating-tx-map-on-success [:transformer tx-item->tx]
       (try (do (dl/update-item @tx-table-name {+txid+ txid} {+finalized+ [:put true] +date+ [:put now]}
                                :expected {+state+ expected-current-state})
                ;; hand craft tx-item (update-item returns nothing)
