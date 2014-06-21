@@ -608,8 +608,9 @@
   `(binding [*current-txid* (+txid+ (make-transaction))]
      (let [~@(when txid-var `(~@txid-var *current-txid*))
            result# (do ~@body)]
-       (commit *current-txid*)
-       (delete *current-txid*)
+       ;; FIXME: commit & delete
+;;       (commit *current-txid*)
+;;       (delete *current-txid*)
        result#)))
 
 (defn- delete-tx-item [txid]
