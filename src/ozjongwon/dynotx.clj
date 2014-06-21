@@ -688,7 +688,7 @@
                                      (utils/error "Transaction was rolled back"
                                                   {:type :transaction-rolled-back :txid txid}))
                                  :else false)]
-            (ensure-grabbing-all-locks txid)
+            (ensure-prerequisite-locks txid)
             (try (mark-committed-or-rolled-back txid +committed+)
                  (catch ConditionalCheckFailedException _ false))
             (recur (dec i) success?)))))
