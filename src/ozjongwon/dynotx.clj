@@ -237,7 +237,8 @@
                 ;; overwrite
                 (and (= existing-op :get-item) (not= op :get-item)))
             (update-tx-map! (tx-item->tx tx-item-from-db) ;; copy tx attributes
-                            {[:requests-map table kvs :version] (+version+ tx-item-from-db)})
+                            {[:requests-map table kvs] request
+                             [:version] (+version+ tx-item-from-db)})
 
             (and (not= existing-op :get-item) (not= op :get-item))
             (utils/error "An existing request other than :get-item found!"
@@ -255,9 +256,9 @@
                                            :return :all-new)
                new-version (get new-tx-item +version+)]
            ;; tx-item update is successful. Now update request-map, request version, etc
-           ;; update-tx-request-map updates tx-map
            (utils/tx-assert (= new-version (inc current-version)) "Unexpected version number from update result")
-           (update-tx-request-map new-tx-item request)
+           ;; update-tx-request-map updates tx-map using current tx+request
+           (update-tx-request-map tx request)
            new-tx-item)
          (catch AmazonServiceException e
            (utils/error "Unexpected AmazonServiceException. Updating failed" {:type :amazon-service-error :error e})))))
@@ -414,7 +415,7 @@
   (let [fully-applied-request-versions (fully-applied-request-versions txid)]
     (doseq [request (get-tx-requests txid)]
       (when-not (contains? fully-applied-request-versions (:version request))
-        (add-request-to-transaction txid request true item-lock-acquire-attempts)))))
+        (add-request-to-transaction txid request)))))
 
 (defn- ensure-grabbing-all-locks [txid request]
   (loop [i tx-lock-acquire-attempts tx-item nil]
