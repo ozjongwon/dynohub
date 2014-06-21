@@ -55,7 +55,7 @@
 ;;;
 ;;; Transaction-Item
 ;;;
-;; (def ^:dynamic *current-tx*) ;; FIXME: remove??
+(def ^:dynamic *current-txid*)
 
 ;; constants
 (def ^:private ^:constant item-lock-acquire-attempts 3)
@@ -385,9 +385,10 @@
                                               +date+ [:put (get-current-time)]
                                               +transient+ [:put true]}}}]
     (loop [attempts item-lock-acquire-attempts expect-exist? true]
+
       (if (<= attempts 0)
         (utils/error "Unable to acquire item lock" {:type :transaction-exception :keys key-map})
-        (let [[expected update-map] (get expect-exist-map expect-exist?)
+        (let [{:keys [expected update-map]} (get expect-exist-map expect-exist?)
               db-item (try (dl/update-item table key-map update-map :expected expected :return :all-new)
                            ;; 1. +txid+ has a value already
                            ;; 2. item is not there yet
@@ -489,7 +490,7 @@
                                    :expected locked-item :get applied-item}))
                    (utils/error "Transaction must have completed since the item no longer exists"
                                 {:type :unknown-completed-transaction :txid (get locked-item +txid+)})))
-    (utils/tx-assert (= return :none) "Unsupported return values: " return)))
+    (utils/tx-assert (or (nil? return) (= return :none)) "Unsupported return values: " return)))
 
 (defmulti item-with-proper-return-value (fn [r _ _ _ _]
                                           (:op r)))
@@ -562,20 +563,21 @@
   ;; If it fails because the 'item' of the request is already in a different transaction,
   ;; tries to rollback the other transaction.
   ;;
-  (ensure-grabbing-all-locks txid request tx-lock-acquire-attempts)
+  (ensure-grabbing-all-locks txid request)
 
   (loop [i tx-lock-contention-resolution-attempts]
     (if (<= i 0)
       (utils/error "Could not add request to transaction"
                    {:type :transaction-exception :txid txid :request request})
-      (if-let [item (try (add-request-to-transaction txid request)
-                         (catch clojure.lang.ExceptionInfo e
-                           (when (> i 1) ;; avoid unnecessary rollback
-                             (if-let [other-txid (:txid (ex-data e))]
-                               (utils/ignore-errors (rollback other-txid))
-                               (utils/error e)))))]
-        (stirp-special-attributes item)
-        (recur (dec i))))))
+      (let [[item error?] (try [(add-request-to-transaction txid request) false]
+                               (catch clojure.lang.ExceptionInfo e
+                                 (when (> i 1) ;; avoid unnecessary rollback
+                                   (if-let [other-txid (:txid (ex-data e))]
+                                     [(utils/ignore-errors (rollback other-txid)) true]
+                                     (utils/error e)))))]
+        (if error?
+          (recur (dec i))
+          (stirp-special-attributes item))))))
 
 (defn- validate-special-attributes-exclusion [attributes]
   (when (some #(contains? special-attributes %) attributes)
@@ -603,17 +605,13 @@
   [(apply dl/ensure-table @tx-table-name [+txid+ :s] opts)
    (apply dl/ensure-table @image-table-name [+image-id+ :s] opts)])
 
-#_
-(defmacro with-transaction [[& tx] & body]
-  (if tx
-    `(let [~@tx (atom (new-transaction))]
-       (binding [*current-tx* ~@tx]
-         ~@body))
-    `(binding [*current-tx* (atom (new-transaction))]
-       (let [result# (do ~@body)]
-         (commit *current-tx*)
-         (delete @*current-tx*)
-         result#))))
+(defmacro with-transaction [[& txid-var] & body]
+  `(binding [*current-txid* (+txid+ (make-transaction))]
+     (let [~@(when txid-var `(~@txid-var *current-txid*))
+           result# (do ~@body)]
+       (commit *current-txid*)
+       (delete *current-txid*)
+       result#)))
 
 (defn- delete-tx-item [txid]
   (dl/delete-item @tx-table-name {+txid+ txid} :expected {+finalized+ true}))
@@ -705,6 +703,7 @@
           (not (empty? opts))   (assoc :opts opts))))
 
 (defn get-item [table prim-kvs & {:keys [attrs consistent? return-cc? txid]
+                                  :or {txid *current-txid*}
                                   :as opts}]
   (validate-special-attributes-exclusion (:keys prim-kvs))
   (attempt-to-add-request-to-tx txid (make-request :op :get-item :table table :prim-kvs prim-kvs :opts opts)))
@@ -753,21 +752,21 @@
   (attempt-to-add-request-to-tx txid request))
 
 (defn put-item [table item & {:keys [return expected return-cc? txid]
-                              :or   {return :none}
+                              :or   {return :none txid *current-txid*}
                               :as   opts}]
   (change-item txid
                item
                (make-request :op :put-item :table table :item item :opts opts)))
 
 (defn update-item [table prim-kvs update-map & {:keys [return expected return-cc? txid]
-                                                :or   {return :none}
+                                                :or   {return :none txid *current-txid*}
                                                 :as   opts}]
   (change-item txid
                (merge prim-kvs update-map)
                (make-request :op :update-item :table table :prim-kvs prim-kvs :update-map update-map :opts opts)))
 
 (defn delete-item [table prim-kvs & {:keys [return expected return-cc? txid]
-                                     :or   {return :none}
+                                     :or   {return :none txid *current-txid*}
                                      :as   opts}]
   (change-item txid
                prim-kvs
