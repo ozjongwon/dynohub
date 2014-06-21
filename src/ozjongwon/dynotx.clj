@@ -124,6 +124,7 @@
   ([tx-item]
      (update-tx-map! tx-item nil))
   ([tx-item kv-map]
+     (println "***??? " kv-map)
      (let [txid (+txid+ tx-item)]
        (dosync (alter tx-map assoc txid tx-item)
                (doseq [[k v] kv-map]
@@ -237,8 +238,7 @@
                 ;; overwrite
                 (and (= existing-op :get-item) (not= op :get-item)))
             (update-tx-map! (tx-item->tx tx-item-from-db) ;; copy tx attributes
-                            {[:requests-map table kvs] request
-                             [:version] (+version+ tx-item-from-db)})
+                            {[:requests-map table kvs] (assoc request :version (+version+ tx-item-from-db))})
 
             (and (not= existing-op :get-item) (not= op :get-item))
             (utils/error "An existing request other than :get-item found!"
@@ -799,7 +799,6 @@
       (put-item :tx-ex {:id "conflictingTransactions_Item1" :which-transaction? :t2-win!})
       (try (commit t1)
            (catch ExceptionInfo e
-             (println "T1 was rolled back" (ex-data e))
              (sweep t1 0 0)
              (delete t1)))
       (put-item :tx-ex {:id "conflictingTransactions_Item3" :which-transaction? :t2-win!}))))
