@@ -228,7 +228,7 @@
 ;;; Java -> Clojure Mapping
 ;;;
 
-(defprotocol Java->Coljure
+(defprotocol Java->Clojure
   (java->clojure [x]))
 
 (defmulti make-DynamoDB-parts (fn [elem & _] elem))
@@ -382,7 +382,7 @@
 ;;;
 ;;; Implementation of java->clojure
 ;;;
-(extend-protocol Java->Coljure
+(extend-protocol Java->Clojure
   nil (java->clojure [_] nil)
 
   java.util.ArrayList (java->clojure [a] (mapv java->clojure a))
