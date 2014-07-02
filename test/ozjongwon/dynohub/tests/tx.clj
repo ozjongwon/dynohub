@@ -50,15 +50,18 @@
   (testing "Two item in one transaction"
     (setup-db)
     (dt/with-transaction [t1]
-      (dt/put-item test-table {:id "conflictingTransactions_Item1" "WhichTransaction?" "t1"})
+      (dt/put-item test-table {:id "conflictingTransactions_Item1" :which-transaction? "t1"})
       (dt/put-item test-table {:id "conflictingTransactions_Item2"})
       (dt/with-transaction [t2]
-        (dt/put-item test-table {:id "conflictingTransactions_Item1" "WhichTransaction?" "t2 - I win!"})
+        (dt/put-item test-table {:id "conflictingTransactions_Item1" :which-transaction? "t2 - I win!"})
         (utils/ignore-errors (dt/commit t1))
         (dt/put-item test-table {:id "conflictingTransactions_Item3"})))
     (is (empty? (dl/scan :_tx_table_)))
     (is (empty? (dl/scan :_image_table_)))
-    (is (= (count (dl/scan test-table)) 2))))
 
+    (is (empty? (dl/get-item test-table {:id "conflictingTransactions_Item2"})))
+    (is (not (empty? (dl/get-item test-table {:id "conflictingTransactions_Item3"}))))
+    (is (= (get (dl/get-item test-table {:id "conflictingTransactions_Item1"}) :which-transaction?)
+           "t2 - I win!"))))
 
 ;;; TX.CLJ ends here
