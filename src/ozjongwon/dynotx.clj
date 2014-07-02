@@ -22,7 +22,8 @@
   (:require [ozjongwon.dynolite  :as dl]
             [ozjongwon.dynohub  :as dh]
             [ozjongwon.utils    :as utils]
-            [clojure.set])
+            ;;[clojure.set]
+            [clojure.tools.macro :as macro])
   (:import  [com.amazonaws.services.dynamodbv2.model
              ConditionalCheckFailedException]
             [com.amazonaws
@@ -714,11 +715,43 @@
           update-map            (assoc :update-map update-map)
           (not (empty? opts))   (assoc :opts opts))))
 
-(defn get-item [table prim-kvs & {:keys [attrs consistent? return-cc? txid]
-                                  :or {txid *current-txid*}
-                                  :as opts}]
+(defmulti make-request-for-dynotx-defn (fn [op & _]
+                                         op))
+
+(defmethod make-request-for-dynotx-defn :get-item [_ table prim-kvs opts]
+  `(make-request :op :get-item :table ~table :prim-kvs ~prim-kvs :opts ~opts))
+
+(defmethod make-request-for-dynotx-defn :put-item [_ table item opts]
+  `(make-request :op :put-item :table ~table :item ~item :opts ~opts))
+
+(defmethod make-request-for-dynotx-defn :update-item [_ table prim-kvs update-map opts]
+  `(make-request :op :update-item :table ~table :prim-kvs ~prim-kvs :update-map ~update-map :opts ~opts))
+
+(defmethod make-request-for-dynotx-defn :delete-item [_ table prim-kvs opts]
+  `(make-request :op :delete-item :table ~table :prim-kvs ~prim-kvs :opts ~opts))
+
+(defmacro dynotx.defn [op [table & args] & body]
+  (let [args-butlast    (cons table (-> (butlast args) (butlast)))
+        map-arg         (last args)
+        txid            (gensym "txid")]
+      `(macro/macrolet [(~'with-txid [[bind#] & body-arg#]
+                          `(let [~bind# ~'~'txid]
+                            ~@body-arg#))]
+         (defn ~op [~@args-butlast & ~(update-in map-arg [:keys] conj 'txid)]
+           (if-let [~'txid (or ~'txid (and (bound? #'*current-txid*) *current-txid*))]
+             (do ~@body)
+             (let [key-args# (mapcat (fn [k# v#] (when v# `(~k# ~v#)))
+                                     (map keyword (:keys ~map-arg))
+                                     (:keys ~map-arg))]
+               (apply ~(ns-resolve (find-ns 'ozjongwon.dynolite) op)
+                      ~@args-butlast
+                      key-args#)))))))
+
+(dynotx.defn get-item [table prim-kvs & {:keys [attrs consistent? return-cc?]
+                                         :as opts}]
   (validate-special-attributes-exclusion (:keys prim-kvs))
-  (attempt-to-add-request-to-tx txid (make-request :op :get-item :table table :prim-kvs prim-kvs :opts opts)))
+  (with-txid [txid]
+    (attempt-to-add-request-to-tx txid (make-request :op :get-item :table table :prim-kvs prim-kvs :opts opts))))
 
 (defn- change-item [txid attributes request]
   (validate-write-item-arguments attributes (:opts request))
@@ -763,39 +796,28 @@
   (validate-write-item-arguments attributes (:opts request))
   (attempt-to-add-request-to-tx txid request))
 
-(defn put-item [table item & {:keys [return expected return-cc? txid]
-                              :or   {return :none txid *current-txid*}
-                              :as   opts}]
-  (change-item txid
-               item
-               (make-request :op :put-item :table table :item item :opts opts)))
-
-(defn update-item [table prim-kvs update-map & {:keys [return expected return-cc? txid]
-                                                :or   {return :none txid *current-txid*}
-                                                :as   opts}]
-  (change-item txid
-               (merge prim-kvs update-map)
-               (make-request :op :update-item :table table :prim-kvs prim-kvs :update-map update-map :opts opts)))
-
-(defn delete-item [table prim-kvs & {:keys [return expected return-cc? txid]
-                                     :or   {return :none txid *current-txid*}
+(dynotx.defn put-item [table item & {:keys [return expected return-cc?]
+                                     :or   {return :none}
                                      :as   opts}]
-  (change-item txid
-               prim-kvs
-               (make-request :op :delete-item :table table :prim-kvs prim-kvs :opts opts)))
+  (with-txid [txid]
+    (change-item txid
+                 item
+                 (make-request :op :put-item :table table :item item :opts opts))))
+
+(dynotx.defn update-item [table prim-kvs update-map & {:keys [return expected return-cc?]
+                                                       :or   {return :none txid *current-txid*}
+                                                :as   opts}]
+  (with-txid [txid]
+    (change-item txid
+                 (merge prim-kvs update-map)
+                 (make-request :op :update-item :table table :prim-kvs prim-kvs :update-map update-map :opts opts))))
+
+(dynotx.defn delete-item [table prim-kvs & {:keys [return expected return-cc? txid]
+                                     :or   {return :none txid *current-txid*}
+                                            :as   opts}]
+  (with-txid [txid]
+    (change-item txid
+                 prim-kvs
+                 (make-request :op :delete-item :table table :prim-kvs prim-kvs :opts opts))))
 
 ;;; DYNOTX.CLJ ends here
-
-;;(init-tx)
-;;(begin-transaction)
-;;(dl/get-item @tx-table-name {+txid+ "3ede573e-0087-4ddf-bd0b-37571cbd6b6c"})
-
-;; (with-transaction []
-;;   (put-item :tx-ex {:id "item1"})
-;;   (put-item :tx-ex {:id "item2"}))
-
-
-
-#_
-(update-tx-map! {:requests-map {}, :fully-applied-request-versions #{}, :_TxId "af9d7060-8b41-4243-a488-a82e7b8bbf02", :_TxS "P", :_TxV 1, :_TxD 1403150833}
-                {[:requests-map :test-table [:id "val"] :version] 10})

@@ -21,8 +21,9 @@
   :global-vars {*warn-on-reflection* true
                 *assert* true}
   :dependencies
-  [[org.clojure/clojure        "1.6.0"]
-   [com.amazonaws/aws-java-sdk "1.7.9" :exclusions [joda-time]]
+  [[org.clojure/clojure         "1.6.0"]
+   [org.clojure/tools.macro     "0.1.2"]
+   [com.amazonaws/aws-java-sdk  "1.7.9" :exclusions [joda-time]]
    ]
 ;;  :source-paths ["src" "src/dynohub"]
 ;;  :test-paths ["test" "test/dynohub"]
