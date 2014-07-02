@@ -15,7 +15,8 @@
        http://goo.gl/22QGA (DynamoDBv2 API)"
   {:author "Jong-won Choi"}
   (:require [clojure.string     :as str]
-            [clojure.edn        :as edn])
+            [clojure.edn        :as edn]
+            [ozjongwon.utils    :as utils])
   (:import  [clojure.lang BigInt]
             [java.util Collections]
             [java.lang Math]
@@ -82,47 +83,8 @@
             com.amazonaws.services.dynamodbv2.util.Tables
             java.nio.ByteBuffer))
 
-;;;
-;;; Utility functions/macros
-;;;
-
-;; LRU cache memoization
-
-(defn lru-cache [max-size]
-  ;;
-  ;; With some google search, Java's LinkedHashMap sounds right.
-  ;; And this one shows exactly what I want : http://books.google.com.au/books?id=I8KdEKceCHAC&pg=PA372&lpg=PA372&dq=linked+hash+map+clojure&source=bl&ots=wNnMP8U6j4&sig=8vJIPTMD9f4CwMUzKy5kxGLnzDU&hl=en&sa=X&ei=dVn_UubCKcqfkwWyoIHgCw&ved=0CG4Q6AEwCA#v=onepage&q=linked%20hash%20map%20clojure&f=false
-  ;;
-  ;; For size, http://www.javaranch.com/journal/2008/08/Journal200808.jsp#a3
-  ;;
-  (proxy [java.util.LinkedHashMap] [16 0.75 true]
-    (removeEldestEntry [entry]
-      (> (count this) max-size))))
-
-(defn bounded-memoize
-  "Return a bounded memoized version of fn 'f'
-   that caches the last 'k' computed values"
-  [f k]
-  (assert (and (fn? f) (integer? k)))
-
-  (let [lru-cache (lru-cache (dec k))]
-    (letfn [(find-memo [arg]
-              ;;(println :find-memo arg)
-              (-> lru-cache (.get arg)))
-            (update-memo [arg new-value]
-              ;;(println :update-memo arg)
-              (-> lru-cache (.put arg new-value)))]
-      (fn [args]
-        (if-let [found (find-memo args)]
-          found
-          (let [new-value (f args)]
-            (update-memo args new-value)
-            new-value))))))
-
 (defn error [s & more]
   (throw (Exception. (apply str more))))
-
-(def maphash (comp (partial apply hash-map) mapcat))
 
 (defn- get-bignum-precision [x]
   (.precision (if (string? x) (BigDecimal. ^String x) (bigdec x))))
@@ -201,11 +163,19 @@
 ;; "HASH" "RANGE"
 ;; "KEYS_ONLY" "INCLUDE" "ALL"
 ;;
+(def ^:dynamic *special-enums*)
 (defn- DynamoDB-enum-str->keyword ^clojure.lang.Keyword [^String s]
-  (-> s
-      (str/replace "_" "-")
-      (str/lower-case)
-      (keyword)))
+  (if (and (bound? #'*special-enums*)
+           (contains? *special-enums* s))
+    s
+    (-> s
+        (str/replace "_" "-")
+        (str/lower-case)
+        (keyword))))
+
+(defn- keyword->DynamoDB-enum-str ^String [^String k]
+  ;; A speical case which is for 'as it is' string
+  k)
 
 (defn- keyword->DynamoDB-enum-str ^String [^clojure.lang.Keyword k]
   (when k
@@ -306,12 +276,12 @@
 
 
 (defmethod make-DynamoDB-parts :attribute-values [_ prim-kvs]
-  (maphash (fn [[k v]]
+  (utils/maphash (fn [[k v]]
              [(name k) (make-DynamoDB-parts :attribute-value v)])
            prim-kvs))
 
 (defmethod make-DynamoDB-parts :expected-attribute-values [_ expected]
-  (maphash (fn [[k v]]
+  (utils/maphash (fn [[k v]]
              [(name k) (ExpectedAttributeValue. (if (= v false)
                                                   false
                                                   (make-DynamoDB-parts :attribute-value v)))])
@@ -319,13 +289,13 @@
 
 (defmethod make-DynamoDB-parts :attribute-value-updates [_ update-map]
   (when-not (empty? update-map)
-    (maphash (fn [[k [action val]]]
-               [(name k) (AttributeValueUpdate. (when-not (nil? val) (make-DynamoDB-parts :attribute-value val))
-                                                (keyword->DynamoDB-enum-str action))])
-             update-map)))
+    (utils/maphash (fn [[k [action val]]]
+                     [(name k) (AttributeValueUpdate. (when-not (nil? val) (make-DynamoDB-parts :attribute-value val))
+                                                      (keyword->DynamoDB-enum-str action))])
+                   update-map)))
 
 (defmethod make-DynamoDB-parts :keys-and-attributes [_ requests]
-  (maphash (fn [[k {:keys [prim-kvs attrs consistent?]}]]
+  (utils/maphash (fn [[k {:keys [prim-kvs attrs consistent?]}]]
              [(name k) (doto-cond (KeysAndAttributes.)
                                   true (.setKeys (make-DynamoDB-parts :key-attributes prim-kvs))
                                   attrs (.setAttributesToGet (mapv name attrs))
@@ -347,7 +317,7 @@
 
 (defmethod make-DynamoDB-parts :conditions [_ conds]
   (when-not (empty? conds)
-    (maphash (fn [[k [op v]]]
+    (utils/maphash (fn [[k [op v]]]
                (assert (vector v) (str "Malformed condition: " v))
                [(name k) (doto (Condition.)
                            (.setComparisonOperator (keyword->DynamoDB-enum-str op))
@@ -366,7 +336,7 @@
 
 (defn- java-result->clojure-with-cc-units-meta [result map]
   (when map
-    (with-meta (maphash (fn [[k v]]
+    (with-meta (utils/maphash (fn [[k v]]
                           [(keyword k) (java->clojure v)])
                         map)
       {:cc-units (java->clojure (.getConsumedCapacity result))})))
@@ -388,7 +358,7 @@
   java.util.ArrayList (java->clojure [a] (mapv java->clojure a))
 
   java.util.HashMap   (java->clojure [m]
-                        (maphash (fn [[k v]]
+                        (utils/maphash (fn [[k v]]
                                    [(keyword k) (java->clojure v)])
                                  m))
 
@@ -526,7 +496,7 @@
       (doto-cond (AmazonDynamoDBClient. credentials)
                  endpoint (.setEndpoint endpoint)))))
 
-(defonce db-client (bounded-memoize %db-client 64)) ;; 64 different cachedoptions
+(defonce db-client (utils/bounded-memoize %db-client 64)) ;; 64 different cachedoptions
 
 ;;
 ;; Managing Tables
@@ -829,7 +799,7 @@
                  return-cc? (.setReturnConsumedCapacity cc-total)))))]
     (merge-more run1 span-reqs
       (run1
-       (maphash (fn [[table-name table-req]]
+       (utils/maphash (fn [[table-name table-req]]
                   [(name table-name) (make-DynamoDB-parts :write-requests table-req)])
                 requests)))))
 
