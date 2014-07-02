@@ -66,7 +66,7 @@
 ;; As in Amazon's code & doc
 (def ^:constant +txid+  "Primary key, UUID"
   :_TxId)
-(def ^:private ^:constant +state+ "pending -> commited or rolled-back"
+(def ^:constant +state+ "pending -> commited or rolled-back"
   :_TxS)
 (def ^:private ^:constant +requests+ "list of items participating in the transaction with unique IDs"
   :_TxR)
@@ -82,7 +82,7 @@
  :_TxD)
 
 ;; State
-(def ^:private ^:constant +pending+ "P")
+(def ^:constant +pending+ "P")
 (def ^:private ^:constant +committed+ "C")
 (def ^:private ^:constant +rolled-back+ "R")
 
@@ -107,7 +107,7 @@
 ;;;
 (def tx-map (ref {}))
 
-(defn- txid->tx [txid]
+(defn txid->tx [txid]
   (get @tx-map txid))
 
 (defn- tx-item->tx [tx-item]
@@ -617,12 +617,12 @@
 
 (defmacro with-transaction [[& txid-var] & body]
   `(binding [*current-txid* (+txid+ (make-transaction))]
-     (let [~@(when txid-var `(~@txid-var *current-txid*))
-           result# (do ~@body)]
-       ;; FIXME: commit & delete
-;;       (commit *current-txid*)
-;;       (delete *current-txid*)
-       result#)))
+     (let [~@(when txid-var `(~@txid-var *current-txid*))]
+       (utils/unwind-protect (do ~@body)
+          (when-let [tx-item# (txid->tx *current-txid*)]
+            (when (= (+state+ tx-item#) +pending+)
+              (utils/ignore-errors (commit *current-txid*)))
+            (delete *current-txid*))))))
 
 (defn- delete-tx-item [txid]
   (dl/delete-item @tx-table-name {+txid+ txid} :expected {+finalized+ true}))
