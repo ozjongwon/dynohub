@@ -71,6 +71,11 @@
 
 (defn hash-map->list [map]
   (mapcat identity map))
-  
+
+(defmacro type-case [i & clauses]
+  `(cond
+     ~@(mapcat (fn [[c e]]
+                 `((instance? ~c ~i) ~e))
+               (partition 2 clauses))))
 
 ;;; UTILS.CLJ ends here
