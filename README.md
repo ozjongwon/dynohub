@@ -25,7 +25,7 @@ Also there are some test cases which may be useful to use the Dynotx layer.
 Add the necessary dependency to your [Leiningen][] `project.clj` and `require` the library in your ns:
 
 ```clojure
-[com.ozjongwon/dynohub "1.1.0-RC1"]              ; project.clj
+[com.ozjongwon/dynohub "1.1.0-RC2"]              ; project.clj
 
 (ns my-app (:require [ozjongwon.dynohub :as dh]  ; low level interface
     	   	     [ozjongwon.dynolite :as dl] ; high level interface

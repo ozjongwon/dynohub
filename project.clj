@@ -9,9 +9,9 @@
 ;;
 ;;
 ;;;; Code:
-(defproject com.ozjongwon/dynohub "1.1.0-RC1"
+(defproject com.ozjongwon/dynohub "1.1.0-RC2"
   :author "Jong-won Choi"
-  :description "Clojure DynamoDB client(/w Clojure 1.6 + aws-java-sdk 1.7.9). Implementation of all the public API for managing tables, reading data, modifying data, and more (as in http://docs.aws.amazon.com/AWSJavaSDK/latest/javadoc/com/amazonaws/services/dynamodbv2/package-summary.html)"
+  :description "Clojure DynamoDB client with or without Transaction layer"
   :url "https://github.com/ozjongwon/dynohub"
   :license {:name "Eclipse Public License"
             :url  "http://www.eclipse.org/legal/epl-v10.html"
