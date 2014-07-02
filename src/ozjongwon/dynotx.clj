@@ -330,6 +330,10 @@
 
     (finalize-transaction txid +committed+)))
 
+(defn- load-item-image [txid version]
+  ;; get the old item of the given  version
+  (dissoc (dl/get-item @image-table-name {+image-id+ (str txid "#" version)} :consistent? true)
+          +image-id+))
 
 (defn- rollback-item-and-release-lock [txid request]
   (let [op (:op request)]
@@ -479,11 +483,6 @@
 (defmethod apply-request-op :default [_ _]
   ;; noop for delete-item and get-item
   nil)
-
-(defn- load-item-image [txid version]
-  ;; get the old item of the given  version
-  (dissoc (dl/get-item @image-table-name {+image-id+ (str txid "#" version)} :consistent? true)
-          +image-id+))
 
 (defn- compute-item-put-or-update [request applied-item locked-item return]
   (case return
