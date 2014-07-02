@@ -78,4 +78,13 @@
                  `((instance? ~c ~i) ~e))
                (partition 2 clauses))))
 
+(defmacro unwind-protect [protected-form & cleanup-form]
+  (let [exception `e#]
+  `(try
+     ~protected-form
+     (catch Exception ~exception
+       (throw ~exception))
+     (finally
+      ~@cleanup-form))))
+
 ;;; UTILS.CLJ ends here
