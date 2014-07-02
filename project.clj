@@ -9,7 +9,7 @@
 ;;
 ;;
 ;;;; Code:
-(defproject com.ozjongwon/dynohub "1.0.0"
+(defproject com.ozjongwon/dynohub "1.0.1-SNAPSHOT"
   :author "Jong-won Choi"
   :description "Clojure DynamoDB client(/w Clojure 1.6 + aws-java-sdk 1.7.9). Implementation of all the public API for managing tables, reading data, modifying data, and more (as in http://docs.aws.amazon.com/AWSJavaSDK/latest/javadoc/com/amazonaws/services/dynamodbv2/package-summary.html)"
   :url "https://github.com/ozjongwon/dynohub"
