@@ -13,7 +13,7 @@ The most of internal details are same between Dynohub and Faraday, except:
   * Further abstraction layers (Dynolite)
   * Flexible binary data read/write
 
-Dynotx provides useful when transaction is required with DynamoDB. It provides the same consistent API functions as Dynolite.
+Dynotx provides 'with-transaction' macro to simplify and hide low level details. It provides the same consistent API functions as Dynolite.
 
 Currently there is no documentation, but most parts of Faraday documentation can be served as Dynohub documentation.
 Also there are some test cases which may be useful to use the Dynotx layer.
