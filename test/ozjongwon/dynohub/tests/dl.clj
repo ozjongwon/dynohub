@@ -9,7 +9,7 @@
 ;;
 ;;
 ;;;; Code:
-(ns ozjongwon.dynohub.tests.main
+(ns ozjongwon.dynohub.tests.dl
   (:require [clojure.test :as test :refer :all]
             [ozjongwon.dynohub :as dh]
             [ozjongwon.dynolite :as dl]
