@@ -9,11 +9,38 @@
 ;;
 ;;;; Code:
 
-(with-transaction [t1]
-  (tx/put-item example-table-name {:item-id "Item1"} :tx @t1)
-  (tx/put-item example-table-name {:item-id "Item2"} :tx @t1)
-  (commit @t1)
-  (delete @t1))
+(ns ozjongwon.dynohub.tests.tx
+  (:require [clojure.test :as test :refer :all]
+            [ozjongwon.dynolite :as dl]
+            [ozjongwon.dynotx :as dt]))
+
+(def test-table :tx-ex)
+
+(defn- setup-db []
+  (dl/delete-table   :_image_table_)
+  (dl/delete-table   :_tx_table_ )
+  (dl/delete-table   test-table)
+  (dt/init-tx)
+  (dl/ensure-table test-table [:id :s])
+#_
+  (with-transaction [t1]
+    (put-item :tx-ex {:id "conflictingTransactions_Item1" :which-transaction? :t1})
+
+    (put-item :tx-ex {:id "conflictingTransactions_Item2"})
+
+    (with-transaction []
+      (put-item :tx-ex {:id "conflictingTransactions_Item1" :which-transaction? :t2-win!})
+      (try (commit t1)
+           (catch ExceptionInfo e
+             (sweep t1 0 0)
+             (delete t1)))
+      (put-item :tx-ex {:id "conflictingTransactions_Item3" :which-transaction? :t2-win!}))))
+
+(dt/with-transaction [t1]
+  (dt/put-item test-table {:id "Item1"})
+  (dt/put-item test-table {:id "Item2"})
+  (dt/commit t1)
+  (dt/delete t1))
 
 (with-transaction [t1]
   (tx/put-item example-table-name {:item-id "conflictingTransactions_Item1" "WhichTransaction?" "t1"} :tx @t1)

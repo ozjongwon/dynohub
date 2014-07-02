@@ -64,7 +64,7 @@
 (def ^:private ^:constant tx-lock-contention-resolution-attempts 3)
 
 ;; As in Amazon's code & doc
-(def ^:private ^:constant +txid+  "Primary key, UUID"
+(def ^:constant +txid+  "Primary key, UUID"
   :_TxId)
 (def ^:private ^:constant +state+ "pending -> commited or rolled-back"
   :_TxS)
@@ -182,7 +182,7 @@
           (utils/error "Transaction not found" {:type :transaction-not-found :txid txid}))
         tx-item))))
 
-(defn- make-transaction
+(defn make-transaction
   "Make a new transaction. Transaction = tx-item + fully-applied-request-versions"
   ([]
      (make-transaction (make-txid)))
@@ -620,7 +620,8 @@
   ([txid] (delete txid -1000))
   ([txid timeout]
      (letfn [(get-completed-tx-item [txid]
-               (when-not (transaction-completed? txid)
+               (if (transaction-completed? txid)
+                 (get-tx-item txid)
                  (try (let [tx-item (get-tx-item txid)]
                         (or (transaction-completed? txid)
                             (utils/error "You can only delete a transaction that is completed"
@@ -782,25 +783,7 @@
 ;;   (put-item :tx-ex {:id "item1"})
 ;;   (put-item :tx-ex {:id "item2"}))
 
-(defn foo []
-  (dl/delete-table   :_image_table_)
-  (dl/delete-table   :_tx_table_ )
-  (dl/delete-table   :tx-ex)
-  (init-tx)
-  (dl/ensure-table :tx-ex [:id :s])
 
-  (with-transaction [t1]
-    (put-item :tx-ex {:id "conflictingTransactions_Item1" :which-transaction? :t1})
-
-    (put-item :tx-ex {:id "conflictingTransactions_Item2"})
-
-    (with-transaction []
-      (put-item :tx-ex {:id "conflictingTransactions_Item1" :which-transaction? :t2-win!})
-      (try (commit t1)
-           (catch ExceptionInfo e
-             (sweep t1 0 0)
-             (delete t1)))
-      (put-item :tx-ex {:id "conflictingTransactions_Item3" :which-transaction? :t2-win!}))))
 
 #_
 (update-tx-map! {:requests-map {}, :fully-applied-request-versions #{}, :_TxId "af9d7060-8b41-4243-a488-a82e7b8bbf02", :_TxS "P", :_TxV 1, :_TxD 1403150833}
