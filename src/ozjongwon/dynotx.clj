@@ -332,17 +332,28 @@
 
 
 (defn- rollback-item-and-release-lock [txid request]
-  (let [expected {+txid+ txid}
-        put-or-update-op (fn []
-                           (dl/update-item (:table request) (prim-kvs request)
-                                           {+txid+ [:delete] +transient+ [:delete] +applied+ [:delete] +date+ [:delete]}
-                                           :expected expected))]
-    (try (case (:op request)
-           :put-item    (put-or-update-op)
-           :update-item (put-or-update-op)
-           :delete-item (dl/delete-item (:table request) (prim-kvs request) :expected expected)
-           :get-item    (release-read-lock txid (:table request) (prim-kvs request)))
-         (catch ConditionalCheckFailedException _))))
+  (let [op (:op request)]
+    (if (= op :get-item)
+      (release-read-lock txid (:table request) (prim-kvs request))
+      (let [version (:version request)
+            item-image (load-item-image txid version)]
+        (if item-image ;; found backup
+          (do (utils/tx-assert (not (+transient+ item-image))
+                               "Didn't expect to have saved an item image for a transient item(txid: "
+                               txid ", item image: " item-image ")")
+              (utils/tx-assert (not (contains? item-image +applied+))
+                               "Old item image should not have contained the attribute " +applied+ "(item image: " item-image ")")
+              (try (dl/put-item (:table request) (dissoc item-image +txid+ +date+) :expected {+txid+ txid})
+                   (catch ConditionalCheckFailedException _)))
+          ;; no backup
+          (try (dl/delete-item (:table request) (prim-kvs request) :expected {+txid+ txid +transient+ true})
+               (catch ConditionalCheckFailedException _)))
+
+        (let [item (dl/get-item (:table request) (prim-kvs request))]
+          (when (and item (= (+txid+ item) txid))
+            (utils/tx-assert (not (contains? item-image +applied+)) "Applied change to item but didn't save a backup (request : " request
+                             " item : " item)
+            (release-read-lock txid (:table request) (prim-kvs request))))))))
 
 
 (defn- post-rollback-cleanup [txid]
@@ -354,7 +365,7 @@
       (delete-item-image txid (:version request)))
     (finalize-transaction txid +rolled-back+)))
 
-(defn- rollback [txid] ;; rollback
+(defn rollback [txid] ;; rollback
   (let [tx-item (try (mark-committed-or-rolled-back txid +rolled-back+)
                      ;; (Maybe??)Fails when
                      ;; 1. it is not in PENDING state
@@ -633,7 +644,8 @@
                           (utils/error e))))))]
        (when-let [tx-item (get-completed-tx-item txid)]
          (when (< (+ (+date+ tx-item) timeout) (get-current-time))
-           (delete-tx-item txid))))))
+           (delete-tx-item txid))))
+     (dosync (alter tx-map dissoc txid))))
 
 (defn sweep [txid rollback-timeout delete-timeout]
   (if (transaction-completed? txid)
