@@ -25,7 +25,7 @@
   (dl/ensure-table test-table [:id :s]))
 
 (deftest two-items-in-a-tx-test
-  (testing "Two item in one transaction"
+  (testing "Two items in one transaction"
     (setup-db)
     (dt/with-transaction [t1]
       (dt/put-item test-table {:id "Item1"})
@@ -35,7 +35,7 @@
     (is (= (count (dl/scan test-table)) 2))))
 
 (deftest two-items-explicit-commit-test
-  (testing "Two item in one transaction"
+  (testing "Two items in one transaction"
     (setup-db)
     (dt/with-transaction [t1]
       (dt/put-item test-table {:id "Item1"})
@@ -47,7 +47,7 @@
 
 
 (deftest conflicting-tx-test
-  (testing "Two item in one transaction"
+  (testing "Conflicts in two transactions"
     (setup-db)
     (dt/with-transaction [t1]
       (dt/put-item test-table {:id "conflictingTransactions_Item1" :which-transaction? "t1"})
