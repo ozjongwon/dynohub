@@ -732,8 +732,7 @@
 
 (defmacro dynotx.defn [op [table & args] & body]
   (let [args-butlast    (cons table (-> (butlast args) (butlast)))
-        map-arg         (last args)
-        txid            (gensym "txid")]
+        map-arg         (last args)]
       `(macro/macrolet [(~'with-txid [[bind#] & body-arg#]
                           `(let [~bind# ~'~'txid]
                             ~@body-arg#))]
