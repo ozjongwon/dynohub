@@ -87,4 +87,18 @@
      (finally
       ~@cleanup-form))))
 
+(defmacro doto-cond "My own version of doto-cond"
+  [exp & clauses]
+  (assert (even? (count clauses)))
+  (let [g (gensym)
+        sexps (map (fn [[cond sexp]]
+                     (if (or (symbol? cond) (list? cond))
+                       `(when ~cond
+                          (~(first sexp) ~g ~@(rest sexp)))
+                       `(~(first sexp) ~g ~@(rest sexp))))
+                   (partition 2 clauses))]
+    `(let [~g ~exp]
+       ~@sexps
+       ~g)))
+
 ;;; UTILS.CLJ ends here

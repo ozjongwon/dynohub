@@ -101,20 +101,6 @@
       n
       (error (str "Invalid number type value " s " from DynamoDB!")))))
 
-(defmacro doto-cond "My own version of doto-cond"
-  [exp & clauses]
-  (assert (even? (count clauses)))
-  (let [g (gensym)
-        sexps (map (fn [[cond sexp]]
-                     (if (or (symbol? cond) (list? cond))
-                       `(when ~cond
-                          (~(first sexp) ~g ~@(rest sexp)))
-                       `(~(first sexp) ~g ~@(rest sexp))))
-                   (partition 2 clauses))]
-    `(let [~g ~exp]
-       ~@sexps
-       ~g)))
-
 (defn- cartesian-product [& seqs]
   ;; From Pascal Costanza's CL code
   (letfn [(simple-cartesian-product [s1 s2]
@@ -237,9 +223,9 @@
   (let [[projection-type non-key-attributes] (cond (keyword? projection) [projection]
                                                    (vector? projection) [:include (mapv name projection)]
                                                    :else (error "Unknown projection type(and value): " projection))]
-    (doto-cond (Projection.)
-               true (.setProjectionType projection-type)
-               non-key-attributes (.setNonKeyAttributes non-key-attributes))))
+    (utils/doto-cond (Projection.)
+                     true (.setProjectionType projection-type)
+                     non-key-attributes (.setNonKeyAttributes non-key-attributes))))
 
 (defmethod make-DynamoDB-parts :global-secondary-indexes [_ gsindexes]
   (->> gsindexes
@@ -296,10 +282,10 @@
 
 (defmethod make-DynamoDB-parts :keys-and-attributes [_ requests]
   (utils/maphash (fn [[k {:keys [prim-kvs attrs consistent?]}]]
-             [(name k) (doto-cond (KeysAndAttributes.)
-                                  true (.setKeys (make-DynamoDB-parts :key-attributes prim-kvs))
-                                  attrs (.setAttributesToGet (mapv name attrs))
-                                  consistent? (.setConsistentRead  consistent?))])
+             [(name k) (utils/doto-cond (KeysAndAttributes.)
+                                        true (.setKeys (make-DynamoDB-parts :key-attributes prim-kvs))
+                                        attrs (.setAttributesToGet (mapv name attrs))
+                                        consistent? (.setConsistentRead  consistent?))])
            requests))
 
 (defmethod make-DynamoDB-parts :key-attributes [_ prim-kvs]
@@ -493,8 +479,8 @@
     (let [^AWSCredentials credentials (if access-key
                                         (BasicAWSCredentials. access-key secret-key)
                                         (DefaultAWSCredentialsProviderChain.))]
-      (doto-cond (AmazonDynamoDBClient. credentials)
-                 endpoint (.setEndpoint endpoint)))))
+      (utils/doto-cond (AmazonDynamoDBClient. credentials)
+                       endpoint (.setEndpoint endpoint)))))
 
 (defonce db-client (utils/bounded-memoize %db-client 64)) ;; 64 different cachedoptions
 
@@ -526,17 +512,17 @@
   (let [table-name (name table-name)
         client (db-client client-opts)
         result (.createTable client
-                  (doto-cond (CreateTableRequest. (make-DynamoDB-parts :attribute-definitions
-                                                                       hash-keydef range-keydef lsindexes gsindexes)
-                                                  table-name
-                                                  (make-DynamoDB-parts :key-schema-elements
-                                                                       hash-keydef range-keydef)
-                                                  (make-DynamoDB-parts :provisioned-throughput
-                                                                          throughput))
-                     lsindexes (.setLocalSecondaryIndexes (make-DynamoDB-parts :local-secondary-indexes)
-                                                          hash-keydef lsindexes)
-                     gsindexes (.setGlobalSecondaryIndexes (make-DynamoDB-parts :global-secondary-indexes
-                                                                                gsindexes))))]
+                  (utils/doto-cond (CreateTableRequest. (make-DynamoDB-parts :attribute-definitions
+                                                                             hash-keydef range-keydef lsindexes gsindexes)
+                                                        table-name
+                                                        (make-DynamoDB-parts :key-schema-elements
+                                                                             hash-keydef range-keydef)
+                                                        (make-DynamoDB-parts :provisioned-throughput
+                                                                             throughput))
+                                   lsindexes (.setLocalSecondaryIndexes (make-DynamoDB-parts :local-secondary-indexes)
+                                                                        hash-keydef lsindexes)
+                                   gsindexes (.setGlobalSecondaryIndexes (make-DynamoDB-parts :global-secondary-indexes
+                                                                                              gsindexes))))]
     (if block?
       (do (Tables/waitForTableToBecomeActive client table-name)
           (describe-table client-opts table-name))
@@ -602,11 +588,11 @@
     :consistent? - Use strongly (rather than eventually) consistent reads?"
   [client-opts table prim-kvs & {:keys [attrs consistent? return-cc?]}]
   (java->clojure (.getItem (db-client client-opts)
-                           (doto-cond (GetItemRequest. (name table)
-                                                       (make-DynamoDB-parts :attribute-values prim-kvs)
-                                                       consistent?)
-                                      attrs            (.setAttributesToGet (mapv name attrs))
-                                      return-cc?       (.setReturnConsumedCapacity cc-total)))))
+                           (utils/doto-cond (GetItemRequest. (name table)
+                                                             (make-DynamoDB-parts :attribute-values prim-kvs)
+                                                             consistent?)
+                                            attrs            (.setAttributesToGet (mapv name attrs))
+                                            return-cc?       (.setReturnConsumedCapacity cc-total)))))
 
 (defn batch-get-item
   "Retrieves a batch of items in a single request.
@@ -668,17 +654,17 @@
   (letfn [(run1 [last-prim-kvs]
             (java->clojure
              (.query (db-client client-opts)
-               (doto-cond (QueryRequest. (name table))
-                 true (.setKeyConditions    (make-DynamoDB-parts :conditions prim-key-conds))
-                 true (.setScanIndexForward (case order :asc true :desc false))
-                 last-prim-kvs   (.setExclusiveStartKey (make-DynamoDB-parts :attribute-values last-prim-kvs))
-                 query-filter    (.setQueryFilter (make-DynamoDB-parts :conditions query-filter))
-                 limit           (.setLimit     (int limit))
-                 index           (.setIndexName      index)
-                 consistent?     (.setConsistentRead consistent?)
-                 (vector? return) (.setAttributesToGet (mapv name return))
-                 (keyword? return) (.setSelect (keyword->DynamoDB-enum-str return))
-                 return-cc?      (.setReturnConsumedCapacity cc-total)))))]
+               (utils/doto-cond (QueryRequest. (name table))
+                                true (.setKeyConditions    (make-DynamoDB-parts :conditions prim-key-conds))
+                                true (.setScanIndexForward (case order :asc true :desc false))
+                                last-prim-kvs   (.setExclusiveStartKey (make-DynamoDB-parts :attribute-values last-prim-kvs))
+                                query-filter    (.setQueryFilter (make-DynamoDB-parts :conditions query-filter))
+                                limit           (.setLimit     (int limit))
+                                index           (.setIndexName      index)
+                                consistent?     (.setConsistentRead consistent?)
+                                (vector? return) (.setAttributesToGet (mapv name return))
+                                (keyword? return) (.setSelect (keyword->DynamoDB-enum-str return))
+                                return-cc?      (.setReturnConsumedCapacity cc-total)))))]
     (merge-more run1 span-reqs (run1 last-prim-kvs))))
 
 (defn scan
@@ -716,15 +702,15 @@
   (letfn [(run1 [last-prim-kvs]
             (java->clojure
              (.scan (db-client client-opts)
-               (doto-cond (ScanRequest. (name table))
-                 attr-conds      (.setScanFilter        (make-DynamoDB-parts :conditions attr-conds))
-                 last-prim-kvs   (.setExclusiveStartKey (make-DynamoDB-parts :attribute-values last-prim-kvs))
-                 limit           (.setLimit             (int limit))
-                 total-segments  (.setTotalSegments     (int total-segments))
-                 segment         (.setSegment           (int segment))
-                 (vector? return) (.setAttributesToGet (mapv name return))
-                 (keyword? return) (.setSelect (keyword->DynamoDB-enum-str return))
-                 return-cc?     (.setReturnConsumedCapacity cc-total)))))]
+               (utils/doto-cond (ScanRequest. (name table))
+                                attr-conds      (.setScanFilter        (make-DynamoDB-parts :conditions attr-conds))
+                                last-prim-kvs   (.setExclusiveStartKey (make-DynamoDB-parts :attribute-values last-prim-kvs))
+                                limit           (.setLimit             (int limit))
+                                total-segments  (.setTotalSegments     (int total-segments))
+                                segment         (.setSegment           (int segment))
+                                (vector? return) (.setAttributesToGet (mapv name return))
+                                (keyword? return) (.setSelect (keyword->DynamoDB-enum-str return))
+                                return-cc?     (.setReturnConsumedCapacity cc-total)))))]
     (merge-more run1 span-reqs (run1 last-prim-kvs))))
 
 ;;
@@ -742,11 +728,11 @@
                              :or   {return :none}}]
   (java->clojure
    (.putItem (db-client client-opts)
-             (doto-cond (PutItemRequest. (name table)
-                                         (make-DynamoDB-parts :attribute-values item)
-                                         (keyword->DynamoDB-enum-str return))
-                        expected (.setExpected     (make-DynamoDB-parts :expected-attribute-values expected))
-                        return-cc? (.setReturnConsumedCapacity cc-total)))))
+             (utils/doto-cond (PutItemRequest. (name table)
+                                               (make-DynamoDB-parts :attribute-values item)
+                                               (keyword->DynamoDB-enum-str return))
+                              expected (.setExpected     (make-DynamoDB-parts :expected-attribute-values expected))
+                              return-cc? (.setReturnConsumedCapacity cc-total)))))
 
 (defn update-item
   "Updates an item in a table by its primary key with options:
@@ -758,12 +744,12 @@
                                             :or   {return :none}}]
   (java->clojure
    (.updateItem (db-client client-opts)
-     (doto-cond (UpdateItemRequest. (name table)
-                                    (make-DynamoDB-parts :attribute-values prim-kvs)
-                                    (make-DynamoDB-parts :attribute-value-updates update-map)
-                                    (keyword->DynamoDB-enum-str return))
-       expected (.setExpected      (make-DynamoDB-parts :expected-attribute-values expected))
-       return-cc? (.setReturnConsumedCapacity cc-total)))))
+     (utils/doto-cond (UpdateItemRequest. (name table)
+                                          (make-DynamoDB-parts :attribute-values prim-kvs)
+                                          (make-DynamoDB-parts :attribute-value-updates update-map)
+                                          (keyword->DynamoDB-enum-str return))
+                      expected (.setExpected      (make-DynamoDB-parts :expected-attribute-values expected))
+                      return-cc? (.setReturnConsumedCapacity cc-total)))))
 
 (defn delete-item
   "Deletes an item from a table by its primary key.
@@ -772,11 +758,11 @@
                                  :or   {return :none}}]
   (java->clojure
    (.deleteItem (db-client client-opts)
-     (doto-cond (DeleteItemRequest. (name table)
-                                    (make-DynamoDB-parts :attribute-values prim-kvs)
-                                    (keyword->DynamoDB-enum-str return))
-                expected (.setExpected     (make-DynamoDB-parts :expected-attribute-values expected))
-                return-cc? (.setReturnConsumedCapacity cc-total)))))
+     (utils/doto-cond (DeleteItemRequest. (name table)
+                                          (make-DynamoDB-parts :attribute-values prim-kvs)
+                                          (keyword->DynamoDB-enum-str return))
+                      expected (.setExpected     (make-DynamoDB-parts :expected-attribute-values expected))
+                      return-cc? (.setReturnConsumedCapacity cc-total)))))
 
 (defn batch-write-item
   "Executes a batch of Puts and/or Deletes in a single request.
@@ -795,8 +781,8 @@
   (letfn [(run1 [raw-req]
             (java->clojure
              (.batchWriteItem (db-client client-opts)
-               (doto-cond (BatchWriteItemRequest. raw-req)
-                 return-cc? (.setReturnConsumedCapacity cc-total)))))]
+               (utils/doto-cond (BatchWriteItemRequest. raw-req)
+                                return-cc? (.setReturnConsumedCapacity cc-total)))))]
     (merge-more run1 span-reqs
       (run1
        (utils/maphash (fn [[table-name table-req]]
