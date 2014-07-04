@@ -14,6 +14,7 @@ The most of internal details are same between Dynohub and Faraday, except:
   * Experimental new design to learn low level Clojure programming
   * Further abstraction layers (Dynolite)
   * Flexible binary data read/write
+  * A transaction layer
 
 Dynotx provides 'with-transaction' macro to simplify and hide low level details. It provides the same consistent API functions as Dynolite.
 
