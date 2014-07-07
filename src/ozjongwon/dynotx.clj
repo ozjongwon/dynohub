@@ -623,6 +623,10 @@
               (utils/ignore-errors (commit *current-txid*)))
             (delete *current-txid*))))))
 
+(defn ensure-transaction []
+  (when-not (bound? #'*current-txid*)
+    (utils/error "Not in a transaction!")))
+
 (defn- delete-tx-item [txid]
   (dl/delete-item @tx-table-name {+txid+ txid} :expected {+finalized+ true}))
 
