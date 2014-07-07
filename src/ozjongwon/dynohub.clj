@@ -128,7 +128,7 @@
 (def ^:dynamic *binary-reader* byte-buffer->sexp)
 
 (defmacro with-binary-reader-writer [[& {:keys [writer reader]
-                                         :or {reader '*binary-reader* writer '*binary-writer*}}]
+                                         :or {reader 'ozjongwon.dynohub/*binary-reader* writer 'ozjongwon.dynohub/*binary-writer*}}]
                                      & body]
   `(binding [*binary-writer* ~writer *binary-reader* ~reader]
      ~@body))

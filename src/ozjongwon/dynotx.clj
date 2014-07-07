@@ -131,7 +131,7 @@
                  (alter tx-map assoc-in `[~txid ~@k] v))))))
 
 
-(defmacro with-updating-tx-map-on-success [[& {:keys [transformer] :or {transformer 'identity}}] & body]
+(defmacro with-updating-tx-map-on-success [[& {:keys [transformer] :or {transformer 'clojure.core/identity}}] & body]
   `(let [tx-item# (do ~@body)]
      (utils/tx-assert (contains? tx-item# +txid+) "Unexpected result for with-updating-tx-map-on-success")
      (update-tx-map! (~transformer tx-item#))
@@ -400,7 +400,6 @@
                                               +date+ [:put (get-current-time)]
                                               +transient+ [:put true]}}}]
     (loop [attempts item-lock-acquire-attempts expect-exist? true]
-
       (if (<= attempts 0)
         (utils/error "Unable to acquire item lock" {:type :transaction-exception :keys key-map})
         (let [{:keys [expected update-map]} (get expect-exist-map expect-exist?)
