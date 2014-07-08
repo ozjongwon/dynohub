@@ -64,4 +64,56 @@
     (is (= (get (dl/get-item test-table {:id "conflictingTransactions_Item1"}) :which-transaction?)
            "t2 - I win!"))))
 
+(deftest update-tx-test
+  (testing "Updates in a transaction"
+    (setup-db)
+    (dt/put-item test-table {:id "id1" :n 1})
+    (dt/with-transaction []
+      (dt/update-item test-table {:id "id1"} {:n [:add 1]} :expected {:n 1} :return :all-new))
+    (is (empty? (dl/scan :_tx_table_)))
+    (is (empty? (dl/scan :_image_table_)))
+    (is (= (:n (dt/get-item test-table {:id "id1"} :attrs [:n]))
+           2))))
+
+(deftest conflicting-updates-tx-test
+  (testing "Conflicting updates in two transactions"
+    (setup-db)
+    (dt/put-item test-table {:id "id1" :n 1})
+    (dt/with-transaction []
+      (let [return (dt/update-item test-table {:id "id1"} {:n [:add 1]} :expected {:n 1} :return :all-new)]
+        (is (= (:n return) 2)))
+      (dt/with-transaction []
+        (let [return (dt/update-item test-table {:id "id1"} {:n [:add 2]} :expected {:n 1} :return :all-old)]
+          (is (= (:n return) 1)))))
+    (is (empty? (dl/scan :_tx_table_)))
+    (is (empty? (dl/scan :_image_table_)))
+    (is (= (:n (dt/get-item test-table {:id "id1"} :attrs [:n]))
+           3))))
+
+(deftest delete-tx-test
+  (testing "Delete in a transaction"
+    (setup-db)
+    (dt/put-item test-table {:id "id1" :n 1})
+    (dt/with-transaction []
+      (let [return (dt/delete-item test-table {:id "id1"} :return :all-old)]
+        (is (= (:n return) 1))))
+    (is (empty? (dl/scan :_tx_table_)))
+    (is (empty? (dl/scan :_image_table_)))
+    (is (empty? (dl/scan test-table)))))
+
+(deftest conflicting-deletes-tx-test
+  (testing "Conflicting deletes in two transactions"
+    (setup-db)
+    (dt/put-item test-table {:id "id1" :n 1})
+    (dt/with-transaction []
+      (let [return (dt/delete-item test-table {:id "id1"} :return :all-old)]
+        (is (= (:n return) 1)))
+      (dt/with-transaction []
+        (let [return (dt/update-item test-table {:id "id1"} {:n [:add 2]} :expected {:n 1} :return :all-old)]
+          (is (= (:n return) 1)))))
+    (is (empty? (dl/scan :_tx_table_)))
+    (is (empty? (dl/scan :_image_table_)))
+    (is (= (:n (dt/get-item test-table {:id "id1"} :attrs [:n]))
+           3))))
+
 ;;; TX.CLJ ends here
