@@ -395,7 +395,11 @@
         {:keys [table]} request
         expect-exist-map {true {:expected (merge {+txid+ false} key-map)
                                 :update-map {+txid+ [:put txid] +date+ [:put (get-current-time)]}}
-                          false {:expected {+txid+ false}
+                          ;; NOTE: the 'expected' option from request has to be valid for this update
+                          ;; and later in the 'real' request it has to exist as (prim-kvs table)
+                          ;; This is to support 'expected' option
+                          ;; See also '%apply-request-op'
+                          false {:expected (merge {+txid+ false} (get-in request [:opts :expected]))
                                  :update-map {+txid+ [:put txid]
                                               +date+ [:put (get-current-time)]
                                               +transient+ [:put true]}}}]
@@ -461,24 +465,38 @@
            ;; Already exists! Ignore!
            (catch ConditionalCheckFailedException _)))))
 
+(defmacro with-opts-prim-keys-expected [[[opts expected] request] & body]
+  `(let [[k# v#] (-> (prim-kvs ~request) (utils/hash-map->list))
+         ~opts  (-> (:opts ~request) (dissoc :expected))
+         ~expected (-> ~opts (assoc-in [:expected k#] v#) (utils/hash-map->list) (:expected))
+         ~opts  (utils/hash-map->list ~opts)]
+     ~@body))
+
+(defn- %apply-request-op [op request locked-item & op-args]
+  ;; NOTE: using with-opts-prim-keys-expected, reinstate 'expected' option back
+  ;; (Amazon's transaction library does not do this)
+  (with-opts-prim-keys-expected [[opts expected] request]
+    (apply op
+           (:table request)
+           (concat op-args
+                   [:expected (merge {+txid+ (get locked-item +txid+) +applied+ false} expected)]
+                   opts))))
+
+
 (defmulti apply-request-op :op)
 (defmethod apply-request-op :put-item [request locked-item]
-  (apply dl/put-item
-         (:table request)
-         (merge (assoc (:item request) +applied+ true)
-                (select-keys locked-item [+txid+ +date+ +transient+]))
-         :expected {+txid+ (get locked-item +txid+) +applied+ false}
-         ;; FIXME: below opts
-         (utils/hash-map->list (:opts request))))
+    (%apply-request-op dl/put-item
+                     request
+                     locked-item
+                     (merge (assoc (:item request) +applied+ true)
+                            (select-keys locked-item [+txid+ +date+ +transient+]))))
 
 (defmethod apply-request-op :update-item [request locked-item]
-  (apply dl/update-item
-         (:table request)
-         (prim-kvs request)
-         (assoc (:update-map request) +applied+ [:put true])
-         :expected {+txid+ (get locked-item +txid+) +applied+ false}
-         ;; FIXME: below opts
-         (utils/hash-map->list (:opts request))))
+  (%apply-request-op dl/update-item
+                     request
+                     locked-item
+                     (prim-kvs request)
+                     (assoc (:update-map request) +applied+ [:put true])))
 
 (defmethod apply-request-op :default [_ _]
   ;; noop for delete-item and get-item
@@ -601,7 +619,10 @@
     ;; FIXME: dynohub does not support some option args
     ;;            (:return-icm is not in dynohub code)
     ;;            Revise dynohub!
-    (let [invalid-opts (select-keys opts [:return-cc? :return-icm :expected])]
+    ;;
+    ;; Amazon's transaction library invalidates ':expected' as well
+    ;; but Dynotx support :expected
+    (let [invalid-opts (select-keys opts [:return-cc? :return-icm])]
       (when-not (empty? invalid-opts)
         (utils/error "Not supported options" {:type :invalid-request :invalid-options (keys invalid-opts)}))))
   (validate-special-attributes-exclusion (keys key-map)))
