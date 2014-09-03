@@ -327,13 +327,12 @@
                         map)
       {:cc-units (java->clojure (.getConsumedCapacity result))})))
 
-(defmacro query-or-scan-result [k r]
+(defmacro query-or-scan-result [r]
   `(hash-map :items (mapv java->clojure (.getItems ~r))
              :count (.getCount ~r)
              :cc-units (java->clojure (.getConsumedCapacity ~r))
              :last-prim-kvs (java->clojure (.getLastEvaluatedKey ~r))
-             ~@(when (= k :scan)
-                 `(:scanned-count (.getScannedCount ~r)))))
+             :scanned-count (.getScannedCount ~r)))
 
 ;;;
 ;;; Implementation of java->clojure
@@ -426,11 +425,11 @@
 
   QueryResult
   (java->clojure [r]
-    (query-or-scan-result :query r))
+    (query-or-scan-result r))
 
   ScanResult
   (java->clojure [r]
-    (query-or-scan-result :scan r))
+    (query-or-scan-result r))
 
   BatchWriteItemResult
   (java->clojure [r]
