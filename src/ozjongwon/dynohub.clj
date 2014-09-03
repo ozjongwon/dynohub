@@ -456,7 +456,8 @@
   ([more-f {max-reqs :max :keys [throttle-ms]} last-result limit]
      (loop [{:keys [items unprocessed last-prim-kvs scanned-count] :as last-result} last-result idx 1]
        (let [more (or unprocessed last-prim-kvs)]
-         (if (or (and limit (>= scanned-count limit)) ;; with :limit in query/scan
+         (if (or (and limit scanned-count (<= limit scanned-count)) ;; limit & scan
+                 (and limit (not scanned-count))                    ;; limit & query
                  (empty? more) (nil? max-reqs) (>= idx max-reqs))
            (if items
              (with-meta items (dissoc last-result :items))
@@ -660,7 +661,7 @@
                                 (vector? return) (.setAttributesToGet (mapv name return))
                                 (keyword? return) (.setSelect (keyword->DynamoDB-enum-str return))
                                 return-cc?      (.setReturnConsumedCapacity cc-total)))))]
-    (merge-more run1 span-reqs (run1 last-prim-kvs limit))))
+    (merge-more run1 span-reqs (run1 last-prim-kvs) limit)))
 
 (defn scan
   "Retrieves items from a table (unindexed) with options:
