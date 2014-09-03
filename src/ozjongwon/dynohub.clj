@@ -426,13 +426,6 @@
 
   QueryResult
   (java->clojure [r]
-    (merge {:items (mapv java->clojure (.getItems r))
-             :count (.getCount r)
-             :cc-units (java->clojure (.getConsumedCapacity r))
-             :last-prim-kvs (java->clojure (.getLastEvaluatedKey r))}))
-
-  QueryResult
-  (java->clojure [r]
     (query-or-scan-result :query r))
 
   ScanResult
@@ -450,25 +443,27 @@
 ;;;;
 
 (defonce cc-total (keyword->DynamoDB-enum-str :total))
+
+(defn- %merge-results [l r]
+  (fn [l r] (cond (number? l) (+    l r)
+                  (vector? l) (into l r)
+                  :else               r)))
+
 (defn- merge-more
-  "Enables auto paging for batch batch-get/write and query/scan requests.
-  Particularly useful for throughput limitations."
-  [more-f {max-reqs :max :keys [throttle-ms]} last-result]
-  ;;{:items {...}, :unprocessed {...}, :cc-units nil}
-  (loop [{:keys [items unprocessed last-prim-kvs] :as last-result} last-result idx 1]
-    (let [more (or unprocessed last-prim-kvs)]
-      (if (or (empty? more) (nil? max-reqs) (>= idx max-reqs))
-        (if items
-          (with-meta items (dissoc last-result :items))
-          last-result)
-        ;;{:items {:a {:b 2}}  :n1 2 :v1  [1 2]}
-        ;;{:items {:a {:b1 2}} :n1 3 :v1  [1 2]}
-        (let [merge-results (fn [l r] (cond (number? l) (+    l r)
-                                            (vector? l) (into l r)
-                                            :else               r))]
-          (when throttle-ms (Thread/sleep throttle-ms))
-          (recur (merge-with merge-results last-result (more-f more))
-                 (inc idx)))))))
+  "Enables auto paging for batch batch-get/write, query/scan requests - useful for throughput limitations."
+  ([more-f span-reqs last-result]
+     (merge-more more-f span-reqs last-result nil))
+  ([more-f {max-reqs :max :keys [throttle-ms]} last-result limit]
+     (loop [{:keys [items unprocessed last-prim-kvs scanned-count] :as last-result} last-result idx 1]
+       (let [more (or unprocessed last-prim-kvs)]
+         (if (or (and limit (>= scanned-count limit)) ;; with :limit in query/scan
+                 (empty? more) (nil? max-reqs) (>= idx max-reqs))
+           (if items
+             (with-meta items (dissoc last-result :items))
+             last-result)
+           (do (when throttle-ms (Thread/sleep throttle-ms))
+               (recur (merge-with %merge-results last-result (more-f more))
+                      (inc idx))))))))
 
 ;;
 ;; Client
@@ -665,7 +660,7 @@
                                 (vector? return) (.setAttributesToGet (mapv name return))
                                 (keyword? return) (.setSelect (keyword->DynamoDB-enum-str return))
                                 return-cc?      (.setReturnConsumedCapacity cc-total)))))]
-    (merge-more run1 span-reqs (run1 last-prim-kvs))))
+    (merge-more run1 span-reqs (run1 last-prim-kvs limit))))
 
 (defn scan
   "Retrieves items from a table (unindexed) with options:
@@ -711,7 +706,7 @@
                                 (vector? return) (.setAttributesToGet (mapv name return))
                                 (keyword? return) (.setSelect (keyword->DynamoDB-enum-str return))
                                 return-cc?     (.setReturnConsumedCapacity cc-total)))))]
-    (merge-more run1 span-reqs (run1 last-prim-kvs))))
+    (merge-more run1 span-reqs (run1 last-prim-kvs) limit)))
 
 ;;
 ;; Modifying Data
