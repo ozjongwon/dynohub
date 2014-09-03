@@ -455,8 +455,7 @@
   ([more-f {max-reqs :max :keys [throttle-ms]} last-result limit]
      (loop [{:keys [items unprocessed last-prim-kvs scanned-count] :as last-result} last-result idx 1]
        (let [more (or unprocessed last-prim-kvs)]
-         (if (or (and limit scanned-count (<= limit scanned-count)) ;; limit & scan
-                 (and limit (not scanned-count))                    ;; limit & query
+         (if (or (and limit (<= limit scanned-count)) ;; limit & query/scan
                  (empty? more) (nil? max-reqs) (>= idx max-reqs))
            (if items
              (with-meta items (dissoc last-result :items))
