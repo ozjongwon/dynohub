@@ -303,13 +303,14 @@
 
 (defmethod make-DynamoDB-parts :conditions [_ conds]
   (when-not (empty? conds)
-    (utils/maphash (fn [[k [op v]]]
-               (assert (vector v) (str "Malformed condition: " v))
-               [(name k) (doto (Condition.)
-                           (.setComparisonOperator (keyword->DynamoDB-enum-str op))
-                           (.setAttributeValueList (mapv #(make-DynamoDB-parts :attribute-value %)
-                                                         (ensure-vector v))))])
-             conds)))
+    (utils/maphash (fn [[k op-def]]
+                     (let [[op v] (ensure-vector op-def)
+                           condition (doto (Condition.) (.setComparisonOperator (keyword->DynamoDB-enum-str op)))]
+                       (when v ;; i.e. not unary operator
+                         (.setAttributeValueList condition (mapv #(make-DynamoDB-parts :attribute-value %)
+                                                                 (ensure-vector v))))
+                       [(name k) condition]))
+                   conds)))
 
 (defmethod make-DynamoDB-parts :write-requests [_ table-req]
   (letfn [(write-req [op m]
@@ -451,12 +452,17 @@
 (defn- merge-more
   "Enables auto paging for batch batch-get/write, query/scan requests - useful for throughput limitations."
   ([more-f span-reqs last-result]
-     (merge-more more-f span-reqs last-result nil))
-  ([more-f {max-reqs :max :keys [throttle-ms]} last-result limit]
+     (merge-more more-f span-reqs last-result nil false))
+  ([more-f {max-reqs :max :keys [throttle-ms]} last-result limit count?]
      (loop [{:keys [items unprocessed last-prim-kvs scanned-count] :as last-result} last-result idx 1]
+       (assert items "PROGRAMMING ERROR! - ASK REVERT BACK to PREVIOUS CODE")
        (let [more (or unprocessed last-prim-kvs)]
          (if (or (and limit (<= limit scanned-count)) ;; limit & query/scan
                  (empty? more) (nil? max-reqs) (>= idx max-reqs))
+           (if count?
+             (:count last-result)
+             (with-meta items (dissoc last-result :items)))
+           #_
            (if items
              (with-meta items (dissoc last-result :items))
              last-result)
@@ -639,7 +645,13 @@
 
   For unindexed item retrievel see `scan`.
 
-  Ref. http://goo.gl/XfGKW for query+scan best practices."
+  Ref. http://goo.gl/XfGKW for query+scan best practices.
+
+  Additional examples:
+
+    (dl/query :employee {:site-uid [:eq \"4w\"]} :query-filter {:phoneNumber :not-null})
+    (dl/query :employee {:site-uid [:eq \"4w\"]} :query-filter {:emailAddress [:contains \"Super\"]} :limit 10)
+"
   [client-opts table prim-key-conds
    & {:keys [last-prim-kvs query-filter span-reqs return index order limit consistent?
              return-cc?] :as opts
@@ -659,7 +671,7 @@
                                 (vector? return) (.setAttributesToGet (mapv name return))
                                 (keyword? return) (.setSelect (keyword->DynamoDB-enum-str return))
                                 return-cc?      (.setReturnConsumedCapacity cc-total)))))]
-    (merge-more run1 span-reqs (run1 last-prim-kvs) limit)))
+    (merge-more run1 span-reqs (run1 last-prim-kvs) limit (= return :count))))
 
 (defn scan
   "Retrieves items from a table (unindexed) with options:
@@ -688,7 +700,13 @@
   For automatic parallelization & segment control see `scan-parallel`.
   For indexed item retrievel see `query`.
 
-  Ref. http://goo.gl/XfGKW for query+scan best practices."
+  Ref. http://goo.gl/XfGKW for query+scan best practices.
+
+  Additional examples:
+
+    (dl/scan :employee :attr-conds {:emailAddress [:contains \"Super\"]} :limit 100)
+    (dl/scan :employee :attr-conds {:emailAddress :null})
+"
   [client-opts table
    & {:keys [attr-conds last-prim-kvs span-reqs return limit total-segments
              segment return-cc?] :as opts
@@ -705,7 +723,7 @@
                                 (vector? return) (.setAttributesToGet (mapv name return))
                                 (keyword? return) (.setSelect (keyword->DynamoDB-enum-str return))
                                 return-cc?     (.setReturnConsumedCapacity cc-total)))))]
-    (merge-more run1 span-reqs (run1 last-prim-kvs) limit)))
+    (merge-more run1 span-reqs (run1 last-prim-kvs) limit (= return :count))))
 
 ;;
 ;; Modifying Data
