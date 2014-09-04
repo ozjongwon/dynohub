@@ -83,4 +83,14 @@
   (when-not (describe-table table-name)
     (apply create-table table-name hash-keydef opts)))
 
+(defn paging-query [table prim-key-conds start length & opts]
+  (if (zero? start)
+    (apply query table prim-key-conds (concat opts [:limit length]))
+    (->> (apply query table prim-key-conds (concat opts [:return :count :limit (max start (- start length))]))
+        meta
+        :last-prim-kvs
+        (vector :last-prim-kvs)
+        (concat opts [:limit length])
+        (apply query table prim-key-conds))))
+
 ;;; DYNOLITE.CLJ ends here
