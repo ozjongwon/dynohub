@@ -455,7 +455,7 @@
 (defn- merge-more
   "Enables auto paging for batch batch-get/write, query/scan requests - useful for throughput limitations."
   ([more-f span-reqs last-result]
-     (merge-more more-f span-reqs last-result nil false))
+     (merge-more more-f span-reqs last-result nil))
   ([more-f {max-reqs :max :keys [throttle-ms]} last-result limit]
      (loop [{:keys [items unprocessed last-prim-kvs scanned-count] :as last-result} last-result idx 1]
        (assert items "PROGRAMMING ERROR! - ASK REVERT BACK to PREVIOUS CODE")
