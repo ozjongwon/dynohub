@@ -463,10 +463,6 @@
          (if (or (and limit (<= limit scanned-count)) ;; limit & query/scan
                  (empty? more) (nil? max-reqs) (>= idx max-reqs))
            (with-meta items (dissoc last-result :items))
-           #_
-           (if items
-             (with-meta items (dissoc last-result :items))
-             last-result)
            (do (when throttle-ms (Thread/sleep throttle-ms))
                (recur (merge-with %merge-results last-result (more-f more))
                       (inc idx))))))))
