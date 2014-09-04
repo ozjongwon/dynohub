@@ -206,16 +206,16 @@
 
 (defmethod make-DynamoDB-parts :local-secondary-indexes [_ hash-keydef lsindexes]
   (->> lsindexes
-       (map (fn [{:keys [name range-keydef projection] :or {projection :all} :as index}]
-              (assert (and name range-keydef projection)
+       (map (fn [{kname :name :keys [range-keydef projection] :or {projection :all} :as index}]
+              (assert (and kname range-keydef) ;; optional - projection
                       (str "Malformed local secondary index (LSI): " index))
-              [name
+              [(name kname)
                (make-DynamoDB-parts :key-schema-elements
                                     hash-keydef range-keydef)
                (make-DynamoDB-parts :projection projection)]))
        (mapv (fn [[n ks p]]
                (doto (LocalSecondaryIndex.)
-                 (.setAttributeName n)
+                 (.setIndexName n)
                  (.setKeySchema ks)
                  (.setProjection p))))))
 
@@ -224,16 +224,16 @@
                                                    (vector? projection) [:include (mapv name projection)]
                                                    :else (error "Unknown projection type(and value): " projection))]
     (utils/doto-cond (Projection.)
-                     true (.setProjectionType projection-type)
-                     non-key-attributes (.setNonKeyAttributes non-key-attributes))))
+                     true (.setProjectionType (keyword->DynamoDB-enum-str projection-type))
+                     non-key-attributes (.setNonKeyAttributes (mapv name non-key-attributes)))))
 
 (defmethod make-DynamoDB-parts :global-secondary-indexes [_ gsindexes]
   (->> gsindexes
-       (map (fn [{:keys [name hash-keydef range-keydef projection throughput] :or {projection :all} :as index}]
-              (assert (and name hash-keydef range-keydef projection throughput)
+       (map (fn [{kname :name :keys [hash-keydef range-keydef projection throughput] :or {projection :all} :as index}]
+              (assert (and kname hash-keydef throughput) ;; optionals - range-keydef,  projection
                       (str "Malformed global secondary index (GSI): " index))
               (doto (GlobalSecondaryIndex.)
-                (.setAttributeName name)
+                (.setIndexName (name kname))
                 (.setKeySchema (make-DynamoDB-parts :key-schema-elements hash-keydef range-keydef))
                 (.setProjection (make-DynamoDB-parts :projection projection))
                 (.setProvisionedThroughput (make-DynamoDB-parts :provisioned-throughput throughput)))))))
@@ -391,6 +391,9 @@
   GlobalSecondaryIndexDescription
   (java->clojure [d] (inline-secondary-index-description-result d :throughput? true))
 
+  Projection
+  (java->clojure [p] {:projection-type    (.getProjectionType p)
+                      :non-key-attributes (.getNonKeyAttributes p)})
   AttributeValue
   (java->clojure [av] (or (.getS av)
                           (some->> (.getN  av) str->dynamo-db-num)
@@ -505,7 +508,22 @@
     :gsindexes    - [{:name _ :hash-keydef _ :range-keydef _
                       :projection #{:all :keys-only [<attr> ...]}
                       :throughput _}].
-    :block?       - Block for table to actually be active?"
+    :block?       - Block for table to actually be active?
+
+  Additional examples:
+
+        (dl/create-table :employee1 [:site-uid :s]
+				     :range-keydef [:uid :s]
+				     :gsindexes [{:name :fname-index :hash-keydef [:emailAddress :s]
+                                                 :range-keydef [:familyName :s]
+                                                 :projection [:firstName :paymentSchedule :phoneNumber :dateEmployment]
+                                                 :throughput {:read 1 :write 1}}])
+
+        (dl/create-table :employee [:site-uid :s]
+				     :range-keydef [:uid :s]
+				     :lsindexes [{:name :family-name-index :range-keydef [:familyName :s]
+                        			 :projection [:firstName :emailAddress :phoneNumber :dateEmployment]}])
+"
   [client-opts table-name hash-keydef
    & {:keys [range-keydef throughput lsindexes gsindexes block?]
       :or   {throughput {:read 1 :write 1}} :as opts}]
@@ -519,8 +537,8 @@
                                                                              hash-keydef range-keydef)
                                                         (make-DynamoDB-parts :provisioned-throughput
                                                                              throughput))
-                                   lsindexes (.setLocalSecondaryIndexes (make-DynamoDB-parts :local-secondary-indexes)
-                                                                        hash-keydef lsindexes)
+                                   lsindexes (.setLocalSecondaryIndexes (make-DynamoDB-parts :local-secondary-indexes
+                                                                                             hash-keydef lsindexes))
                                    gsindexes (.setGlobalSecondaryIndexes (make-DynamoDB-parts :global-secondary-indexes
                                                                                               gsindexes))))]
     (if block?
@@ -666,7 +684,7 @@
                                 last-prim-kvs   (.setExclusiveStartKey (make-DynamoDB-parts :attribute-values last-prim-kvs))
                                 query-filter    (.setQueryFilter (make-DynamoDB-parts :conditions query-filter))
                                 limit           (.setLimit     (int limit))
-                                index           (.setIndexName      index)
+                                index           (.setIndexName      (name index))
                                 consistent?     (.setConsistentRead consistent?)
                                 (vector? return) (.setAttributesToGet (mapv name return))
                                 (keyword? return) (.setSelect (keyword->DynamoDB-enum-str return))
