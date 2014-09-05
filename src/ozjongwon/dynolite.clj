@@ -101,7 +101,4 @@
                                     (apply query table prim-key-conds)))))]
     (with-meta result (assoc (meta result) :records-total records-total :records-filtered records-filtered))))
 
-
-;; (dl/paging-query :employee {:site-uid [:eq "4w"] :familyName [:begins-with "S"]} 31 10 :index :family-name-index )
-
 ;;; DYNOLITE.CLJ ends here
