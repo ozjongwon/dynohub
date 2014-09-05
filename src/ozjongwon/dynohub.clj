@@ -634,6 +634,7 @@
     prim-key-conds - {<key-attr> [<comparison-operator> <val-or-vals>] ...}.
     :last-prim-kvs - Primary key-val from which to eval, useful for paging.
     :query-filter  - {<key-attr> [<comparison-operator> <val-or-vals>] ...}.
+    :logical-op    - A logical operator to apply to :query-filter, #{:and :or}
     :span-reqs     - {:max _ :throttle-ms _} controls automatic multi-request
                      stitching.
     :return        - e/o #{:all-attributes :all-projected-attributes :count
@@ -665,7 +666,7 @@
     (dl/query :employee {:site-uid [:eq \"4w\"]} :query-filter {:emailAddress [:contains \"Super\"]} :limit 10)
 "
   [client-opts table prim-key-conds
-   & {:keys [last-prim-kvs query-filter span-reqs return index order limit consistent?
+   & {:keys [last-prim-kvs query-filter logical-op span-reqs return index order limit consistent?
              return-cc?] :as opts
       :or   {span-reqs {:max 5}
              order     :asc}}]
@@ -677,6 +678,8 @@
                                 true (.setScanIndexForward (case order :asc true :desc false))
                                 last-prim-kvs   (.setExclusiveStartKey (make-DynamoDB-parts :attribute-values last-prim-kvs))
                                 query-filter    (.setQueryFilter (make-DynamoDB-parts :conditions query-filter))
+                                logical-op      (.setConditionalOperator (keyword->DynamoDB-enum-str logical-op))
+
                                 limit           (.setLimit     (int limit))
                                 index           (.setIndexName      (name index))
                                 consistent?     (.setConsistentRead consistent?)
@@ -688,6 +691,7 @@
 (defn scan
   "Retrieves items from a table (unindexed) with options:
     :attr-conds     - {<attr> [<comparison-operator> <val-or-vals>] ...}.
+    :logical-op    - A logical operator to apply to :attr-conds, #{:and :or}
     :limit          - Max num >=1 of items to eval (≠ num of matching items).
                       Useful to prevent harmful sudden bursts of read activity.
     :last-prim-kvs  - Primary key-val from which to eval, useful for paging.
@@ -720,7 +724,7 @@
     (dl/scan :employee :attr-conds {:emailAddress :null})
 "
   [client-opts table
-   & {:keys [attr-conds last-prim-kvs span-reqs return limit total-segments
+   & {:keys [attr-conds logical-op last-prim-kvs span-reqs return limit total-segments
              segment return-cc?] :as opts
       :or   {span-reqs {:max 5}}}]
   (letfn [(run1 [last-prim-kvs]
@@ -728,6 +732,8 @@
              (.scan (db-client client-opts)
                (utils/doto-cond (ScanRequest. (name table))
                                 attr-conds      (.setScanFilter        (make-DynamoDB-parts :conditions attr-conds))
+                                logical-op      (.setConditionalOperator (keyword->DynamoDB-enum-str logical-op))
+
                                 last-prim-kvs   (.setExclusiveStartKey (make-DynamoDB-parts :attribute-values last-prim-kvs))
                                 limit           (.setLimit             (int limit))
                                 total-segments  (.setTotalSegments     (int total-segments))
