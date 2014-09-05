@@ -84,18 +84,23 @@
     (apply create-table table-name hash-keydef opts)))
 
 (defn pagination-query [table prim-key-conds start length & opts]
-  (if (zero? start)
-    (apply query table prim-key-conds (concat opts [:limit length]))
-    (let [last-prim-kvs (-> (apply query table prim-key-conds
-                                   (concat opts [:return :count :limit (max start (- start length))]))
-                            meta
-                            :last-prim-kvs)]
+  (let [{records-total :scanned-count records-filtered :count}
+        (-> (apply query table prim-key-conds (concat opts [:return :count]))
+            meta
+            (select-keys [:scanned-count :count]))
+        result (cond (zero? records-total) []
+                     (zero? start) (apply query table prim-key-conds (concat opts [:limit length]))
+                     :else (let [last-prim-kvs (-> (apply query table prim-key-conds
+                                                          (concat opts [:return :count :limit (max start (- start length))]))
+                                                   meta
+                                                   :last-prim-kvs)]
+                             (if (nil? last-prim-kvs)
+                               []
+                               (->> (vector :last-prim-kvs last-prim-kvs)
+                                    (concat opts [:limit length])
+                                    (apply query table prim-key-conds)))))]
+    (with-meta result (assoc (meta result) :records-total records-total :records-filtered records-filtered))))
 
-      (if (nil? last-prim-kvs)
-        []
-        (->> (vector :last-prim-kvs last-prim-kvs)
-             (concat opts [:limit length])
-             (apply query table prim-key-conds))))))
 
 ;; (dl/paging-query :employee {:site-uid [:eq "4w"] :familyName [:begins-with "S"]} 31 10 :index :family-name-index )
 
