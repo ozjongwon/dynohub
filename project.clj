@@ -9,7 +9,7 @@
 ;;
 ;;
 ;;;; Code:
-(defproject com.ozjongwon/dynohub "1.1.0-RC15"
+(defproject com.ozjongwon/dynohub "1.1.0-RC16"
   :author "Jong-won Choi"
   :description "Clojure DynamoDB client with or without Transaction layer"
   :url "https://github.com/ozjongwon/dynohub"
@@ -23,7 +23,7 @@
   :dependencies
   [[org.clojure/clojure         "1.6.0"]
    [org.clojure/tools.macro     "0.1.2"]
-   [com.amazonaws/aws-java-sdk  "1.7.9" :exclusions [joda-time]]
+   [com.amazonaws/aws-java-sdk  "1.9.0" :exclusions [joda-time]]
    ]
 ;;  :source-paths ["src" "src/dynohub"]
 ;;  :test-paths ["test" "test/dynohub"]
