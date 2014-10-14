@@ -41,7 +41,11 @@
   (str (UUID/randomUUID)))
 
 (defn- %table-keys [table]
-  (keys (:prim-keys (dl/describe-table table))))
+  (for [[k v] (:prim-keys (dl/describe-table :employee))
+        ;; NB: update-item does not allow local/global indexes in prim-kvs
+        ;; And only *real* prim-kvs has key-type
+        :when (:key-type v)]
+    k))
 
 (defonce table-keys (utils/bounded-memoize %table-keys 64))
 
