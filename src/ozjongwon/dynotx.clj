@@ -291,7 +291,7 @@
   (dl/delete-item (:table req) (prim-kvs req) :expected {+txid+ txid}))
 
 (defmethod unlock-item-after-commit-using-op :get-item [req txid]
-  (release-read-lock txid (:table req) (prim-kvs req)))
+  (release-read-lock (:table req) (prim-kvs req) txid))
 
 (defn- unlock-item-after-commit [txid req]
   (try (unlock-item-after-commit-using-op req txid)
@@ -339,7 +339,7 @@
 (defn- rollback-item-and-release-lock [txid request]
   (let [op (:op request)]
     (if (= op :get-item)
-      (release-read-lock txid (:table request) (prim-kvs request))
+      (release-read-lock (:table request) (prim-kvs request) txid)
       (let [version (:version request)
             item-image (load-item-image txid version)]
         (if item-image ;; found backup
@@ -358,7 +358,7 @@
           (when (and item (= (+txid+ item) txid))
             (utils/tx-assert (not (contains? item-image +applied+)) "Applied change to item but didn't save a backup (request : " request
                              " item : " item)
-            (release-read-lock txid (:table request) (prim-kvs request))))))))
+            (release-read-lock (:table request) (prim-kvs request) txid)))))))
 
 
 (defn- post-rollback-cleanup [txid]
@@ -415,7 +415,6 @@
               lock-holder (get db-item +txid+)]
           (cond (nil? lock-holder) ;; no lock found, try it again with 'new item' + 'transient'
                 (recur (dec attempts) false)
-
                 (= lock-holder txid) db-item ;; success!
                 ;; lock-holder is not this transaction. Try to steal the lock from the lock-holder
                 :else (do (when (> attempts 1)
@@ -423,7 +422,7 @@
                                  (catch ExceptionInfo ex
                                    (case (:type (ex-data ex))
                                      :transaction-completed nil
-                                     :transaction-not-found (release-read-lock lock-holder table key-map)
+                                     :transaction-not-found (release-read-lock table key-map lock-holder)
                                      (utils/error ex)))))
                           (recur (dec attempts) true))))))))
 
