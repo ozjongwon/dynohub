@@ -488,7 +488,7 @@
 
 (defmulti apply-request-op :op)
 (defmethod apply-request-op :put-item [request locked-item]
-    (%apply-request-op dl/put-item
+  (%apply-request-op dl/put-item
                      request
                      locked-item
                      (merge (assoc (:item request) +applied+ true)
