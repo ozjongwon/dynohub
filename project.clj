@@ -9,7 +9,7 @@
 ;;
 ;;
 ;;;; Code:
-(defproject com.ozjongwon/dynohub "1.1.0-RC17"
+(defproject com.ozjongwon/dynohub "1.1.0-RC18"
   :author "Jong-won Choi"
   :description "Clojure DynamoDB client with or without Transaction layer"
   :url "https://github.com/ozjongwon/dynohub"
