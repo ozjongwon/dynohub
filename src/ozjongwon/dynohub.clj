@@ -660,6 +660,7 @@
     :exp-attr-val-map  - {<subst-var-string> <val>}, that can be substituted in filter-exp
                 <subst-var-string> starts with :
     :filter-exp    - A string expression which uses subst variables in exp-attr-*-map
+                For available comparators and functions, see http://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Expressions.SpecifyingConditions.html#ConditionExpressionReference
     :projection-exp - Comma seperated attribute names(or substituted names) to project.
 
   Note: the newly added exp-attr-*-map and filter-exp might be the Amazon's preferred way of doing filtering.
@@ -740,6 +741,7 @@
     :exp-attr-val-map  - {<subst-var-string> <val>}, that can be substituted in filter-exp
                 <subst-var-string> starts with :
     :filter-exp    - A string expression which uses subst variables in exp-attr-*-map
+                For available comparators and functions, see http://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Expressions.SpecifyingConditions.html#ConditionExpressionReference
     :projection-exp - Comma seperated attribute names(or substituted names) to project.
 
   Note: the newly added exp-attr-*-map and filter-exp might be the Amazon's preferred way of doing filtering.
