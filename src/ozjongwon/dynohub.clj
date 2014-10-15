@@ -644,6 +644,15 @@
                      Useful to prevent harmful sudden bursts of read activity.
     :consistent?   - Use strongly (rather than eventually) consistent reads?
 
+    :exp-attr-name-map - {<subst-attr-string> <attr-str>}, that can be substituted in filter-exp
+                <subst-attr-string> starts with #
+    :exp-attr-val-map  - {<subst-var-string> <val>}, that can be substituted in filter-exp
+                <subst-var-string> starts with :
+    :filter-exp    - A string expression which uses subst variables in exp-attr-*-map
+
+  Note: the newly added exp-attr-*-map and filter-exp might be the Amazon's preferred way of doing filtering.
+        Only one of query-filter(and logical-op) or filter-exp(and exp-attr-*-map) has to exist in a query/scan.
+
   (create-table client-opts :my-table [:name :s]
     {:range-keydef [:age :n] :block? true})
 
@@ -663,10 +672,14 @@
 
     (dl/query :employee {:site-uid [:eq \"4w\"]} :query-filter {:phoneNumber :not-null})
     (dl/query :employee {:site-uid [:eq \"4w\"]} :query-filter {:emailAddress [:contains \"Super\"]} :limit 10)
+    (dl/query :employee {:site-id [:eq \"4w\"]}
+              :exp-attr-name-map {\"#f\" \"firstName\" \"#s\" \"site-id\"}
+              :exp-attr-val-map {\":fn\" \"Louis\" \":id\" \"4w\"}
+              :filter-exp \"#f = :fn AND #s = :id\")
 "
   [client-opts table prim-key-conds
    & {:keys [last-prim-kvs query-filter logical-op span-reqs return index order limit consistent?
-             return-cc?] :as opts
+             return-cc? filter-exp exp-attr-name-map exp-attr-val-map] :as opts
       :or   {span-reqs {:max 5}
              order     :asc}}]
   (letfn [(run1 [last-prim-kvs]
@@ -684,7 +697,10 @@
                                 consistent?     (.setConsistentRead consistent?)
                                 (vector? return) (.setAttributesToGet (mapv name return))
                                 (keyword? return) (.setSelect (keyword->DynamoDB-enum-str return))
-                                return-cc?      (.setReturnConsumedCapacity cc-total)))))]
+                                return-cc?      (.setReturnConsumedCapacity cc-total)
+                                exp-attr-name-map (.setExpressionAttributeNames exp-attr-name-map)
+                                exp-attr-val-map (.setExpressionAttributeValues (make-DynamoDB-parts :attribute-values exp-attr-val-map))
+                                filter-exp (.setFilterExpression filter-exp)))))]
     (merge-more run1 span-reqs (run1 last-prim-kvs) limit)))
 
 (defn scan
@@ -700,6 +716,14 @@
                             [<attr> ...]}.
     :total-segments - Total number of parallel scan segments.
     :segment        - Calling worker's segment number (>=0, <=total-segments).
+    :exp-attr-name-map - {<subst-attr-string> <attr-str>}, that can be substituted in filter-exp
+                <subst-attr-string> starts with #
+    :exp-attr-val-map  - {<subst-var-string> <val>}, that can be substituted in filter-exp
+                <subst-var-string> starts with :
+    :filter-exp    - A string expression which uses subst variables in exp-attr-*-map
+
+  Note: the newly added exp-attr-*-map and filter-exp might be the Amazon's preferred way of doing filtering.
+        Only one of attr-cond(and logical-op) or filter-exp(and exp-attr-*-map) has to exist in a query/scan.
 
   comparison-operators e/o #{:eq :le :lt :ge :gt :begins-with :between :ne
                              :not-null :null :contains :not-contains :in}.
@@ -721,10 +745,14 @@
 
     (dl/scan :employee :attr-conds {:emailAddress [:contains \"Super\"]} :limit 100)
     (dl/scan :employee :attr-conds {:emailAddress :null})
+    (dl/scan :employee
+             :exp-attr-name-map {\"#f\" \"firstName\" \"#s\" \"site-id\"}
+	     :exp-attr-val-map {\":fn\" \"Louis\" \":id\" \"4w\"}
+	     :filter-exp \"#f = :fn AND #s = :id\")
 "
   [client-opts table
    & {:keys [attr-conds logical-op last-prim-kvs span-reqs return limit total-segments
-             segment return-cc?] :as opts
+             segment return-cc? filter-exp exp-attr-name-map exp-attr-val-map] :as opts
       :or   {span-reqs {:max 5}}}]
   (letfn [(run1 [last-prim-kvs]
             (java->clojure
@@ -739,7 +767,10 @@
                                 segment         (.setSegment           (int segment))
                                 (vector? return) (.setAttributesToGet (mapv name return))
                                 (keyword? return) (.setSelect (keyword->DynamoDB-enum-str return))
-                                return-cc?     (.setReturnConsumedCapacity cc-total)))))]
+                                return-cc?     (.setReturnConsumedCapacity cc-total)
+                                exp-attr-name-map (.setExpressionAttributeNames exp-attr-name-map)
+                                exp-attr-val-map (.setExpressionAttributeValues (make-DynamoDB-parts :attribute-values exp-attr-val-map))
+                                filter-exp (.setFilterExpression filter-exp)))))]
     (merge-more run1 span-reqs (run1 last-prim-kvs) limit)))
 
 ;;
