@@ -596,14 +596,25 @@
   "Retrieves an item from a table by its primary key with options:
     prim-kvs     - {<hash-key> <val>} or {<hash-key> <val> <range-key> <val>}.
     :attrs       - Attrs to return, [<attr> ...].
-    :consistent? - Use strongly (rather than eventually) consistent reads?"
-  [client-opts table prim-kvs & {:keys [attrs consistent? return-cc?]}]
+    :consistent? - Use strongly (rather than eventually) consistent reads?
+    :exp-attr-name-map - {<subst-attr-string> <attr-str>}, that can be substituted in filter-exp
+                <subst-attr-string> starts with #
+    :projection-exp - Comma seperated attribute names(or substituted names) to project.
+
+  Ex)
+    (dl/get-item :employee {:site-id \"4w\", :id \"yVSEkgAb9dDWtA\"}
+                 :projection-exp \"#fn, #sn, #e, #p, #d, #t, #i\"
+		 :exp-attr-name-map {\"#fn\" \"firstName\" \"#sn\" \"familyName\" \"#e\" \"emailAddress\" \"#p\" \"phoneNumber\" \"#d\" \"dateEmployment\" \"#t\" \"terminatedP\" \"#i\" \"id\"})
+"
+  [client-opts table prim-kvs & {:keys [attrs consistent? return-cc? exp-attr-name-map projection-exp]}]
   (java->clojure (.getItem (db-client client-opts)
                            (utils/doto-cond (GetItemRequest. (name table)
                                                              (make-DynamoDB-parts :attribute-values prim-kvs)
                                                              consistent?)
                                             attrs            (.setAttributesToGet (mapv name attrs))
-                                            return-cc?       (.setReturnConsumedCapacity cc-total)))))
+                                            return-cc?       (.setReturnConsumedCapacity cc-total)
+                                            exp-attr-name-map (.setExpressionAttributeNames exp-attr-name-map)
+                                            projection-exp   (.setProjectionExpression projection-exp)))))
 
 (defn batch-get-item
   "Retrieves a batch of items in a single request.
@@ -649,6 +660,7 @@
     :exp-attr-val-map  - {<subst-var-string> <val>}, that can be substituted in filter-exp
                 <subst-var-string> starts with :
     :filter-exp    - A string expression which uses subst variables in exp-attr-*-map
+    :projection-exp - Comma seperated attribute names(or substituted names) to project.
 
   Note: the newly added exp-attr-*-map and filter-exp might be the Amazon's preferred way of doing filtering.
         Only one of query-filter(and logical-op) or filter-exp(and exp-attr-*-map) has to exist in a query/scan.
@@ -676,10 +688,16 @@
               :exp-attr-name-map {\"#f\" \"firstName\" \"#s\" \"site-id\"}
               :exp-attr-val-map {\":fn\" \"Louis\" \":id\" \"4w\"}
               :filter-exp \"#f = :fn AND #s = :id\")
+    (dl/query :employee {:site-id [:eq \"4w\"]}
+              :index :family-name-index
+              :projection-exp \"#fn, #sn, #e, #p, #d, #t, #i\"
+	      :exp-attr-name-map {\"#a\" \"active?\" \"#fn\" \"firstName\" \"#sn\" \"familyName\" \"#e\" \"emailAddress\" \"#p\" \"phoneNumber\" \"#d\" \"dateEmployment\" \"#t\" \"terminatedP\" \"#i\" \"id\"}
+	      :exp-attr-val-map {\":active\" true}
+	      :filter-exp \"#a = :active\")
 "
   [client-opts table prim-key-conds
    & {:keys [last-prim-kvs query-filter logical-op span-reqs return index order limit consistent?
-             return-cc? filter-exp exp-attr-name-map exp-attr-val-map] :as opts
+             return-cc? filter-exp exp-attr-name-map exp-attr-val-map projection-exp] :as opts
       :or   {span-reqs {:max 5}
              order     :asc}}]
   (letfn [(run1 [last-prim-kvs]
@@ -700,7 +718,8 @@
                                 return-cc?      (.setReturnConsumedCapacity cc-total)
                                 exp-attr-name-map (.setExpressionAttributeNames exp-attr-name-map)
                                 exp-attr-val-map (.setExpressionAttributeValues (make-DynamoDB-parts :attribute-values exp-attr-val-map))
-                                filter-exp (.setFilterExpression filter-exp)))))]
+                                filter-exp (.setFilterExpression filter-exp)
+                                projection-exp   (.setProjectionExpression projection-exp)))))]
     (merge-more run1 span-reqs (run1 last-prim-kvs) limit)))
 
 (defn scan
@@ -721,6 +740,7 @@
     :exp-attr-val-map  - {<subst-var-string> <val>}, that can be substituted in filter-exp
                 <subst-var-string> starts with :
     :filter-exp    - A string expression which uses subst variables in exp-attr-*-map
+    :projection-exp - Comma seperated attribute names(or substituted names) to project.
 
   Note: the newly added exp-attr-*-map and filter-exp might be the Amazon's preferred way of doing filtering.
         Only one of attr-cond(and logical-op) or filter-exp(and exp-attr-*-map) has to exist in a query/scan.
@@ -749,10 +769,16 @@
              :exp-attr-name-map {\"#f\" \"firstName\" \"#s\" \"site-id\"}
 	     :exp-attr-val-map {\":fn\" \"Louis\" \":id\" \"4w\"}
 	     :filter-exp \"#f = :fn AND #s = :id\")
+    (dl/scan :employee
+             :index :family-name-index
+             :projection-exp \"#fn, #sn, #e, #p, #d, #t, #i\"
+	     :exp-attr-name-map {\"#a\" \"active?\" \"#fn\" \"firstName\" \"#sn\" \"familyName\" \"#e\" \"emailAddress\" \"#p\" \"phoneNumber\" \"#d\" \"dateEmployment\" \"#t\" \"terminatedP\" \"#i\" \"id\"}
+	     :exp-attr-val-map {\":active\" true}
+	     :filter-exp \"#a = :active\")
 "
   [client-opts table
    & {:keys [attr-conds logical-op last-prim-kvs span-reqs return limit total-segments
-             segment return-cc? filter-exp exp-attr-name-map exp-attr-val-map] :as opts
+             segment return-cc? filter-exp exp-attr-name-map exp-attr-val-map projection-exp] :as opts
       :or   {span-reqs {:max 5}}}]
   (letfn [(run1 [last-prim-kvs]
             (java->clojure
@@ -770,7 +796,8 @@
                                 return-cc?     (.setReturnConsumedCapacity cc-total)
                                 exp-attr-name-map (.setExpressionAttributeNames exp-attr-name-map)
                                 exp-attr-val-map (.setExpressionAttributeValues (make-DynamoDB-parts :attribute-values exp-attr-val-map))
-                                filter-exp (.setFilterExpression filter-exp)))))]
+                                filter-exp (.setFilterExpression filter-exp)
+                                projection-exp   (.setProjectionExpression projection-exp)))))]
     (merge-more run1 span-reqs (run1 last-prim-kvs) limit)))
 
 ;;
