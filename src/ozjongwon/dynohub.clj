@@ -589,6 +589,129 @@
   (java->clojure (.deleteTable (db-client client-opts) (DeleteTableRequest. (name table)))))
 
 ;;
+;; Filter expression, etc
+;;
+(defn- exp-alias [n prefix]
+  (let [n (name n)]
+    (if (identical? (get n 0) prefix)
+      n
+      (str prefix n))))
+
+(defn- alias-attr->map [aliases prefix val-conv]
+  (utils/maphash (fn [[f s]]
+                   [(exp-alias f prefix) (val-conv s)])
+                 aliases))
+
+(defn- alias-attr-value-map->exp-map [aliases]
+  (alias-attr->map aliases \: identity))
+
+(defn- alias-attr-name-map->exp-map [aliases]
+  (alias-attr->map aliases \# name))
+
+(defmulti op->filter-exp-str (fn [op & _]
+                               (cond (contains? #{:exists :not-exists :begins-with :contains} op)       :function
+                                     (contains? #{:= :<> :< :<= :> :>=} op)                             :comparator
+                                     (contains? #{:and :or} op)                                         :and-or
+                                     :else op)))
+
+(def ^:dynamic *name-aliases*)
+
+(def ^:dynamic *value-aliases*)
+
+(defn filter-exp->filter-exp-str [exp & {:keys [name-aliases value-aliases]}]
+  (binding [*name-aliases* (if (bound? #'*name-aliases*)
+                             *name-aliases*
+                             name-aliases)
+            *value-aliases* (if (bound? #'*value-aliases*)
+                              *value-aliases*
+                              value-aliases)]
+    (if (coll? exp)
+      (op->filter-exp-str (first exp)
+                          (map (fn [x]
+                                 (filter-exp->filter-exp-str x name-aliases value-aliases))
+                               (rest exp)))
+      exp)))
+
+(defn- maybe-substitute-name-alias [n & not-found-value]
+  (if (get *name-aliases* n)
+    (exp-alias n \#)
+    (first not-found-value)))
+
+(defn- maybe-substitute-name-aliases [attrs alias-map]
+  (map #(binding [*name-aliases* alias-map]
+          (maybe-substitute-name-alias % (name %))) attrs))
+
+(defn projection-attrs->exp [attrs alias-map]
+  (->> (maybe-substitute-name-aliases attrs alias-map)
+       (interpose ",")
+       (apply str)))
+
+(defn- maybe-substitute-value-alias [v & not-found-value]
+  (if (get *value-aliases* v)
+    (exp-alias v \:)
+    (first not-found-value)))
+
+(defn- substitute-value-alias [v]
+  (let [result (maybe-substitute-value-alias v)]
+    (assert result (str v " must be valid alias value"))
+    result))
+
+(defn- maybe-substitute-aliases [col]
+  (for [nv col]
+    (or (maybe-substitute-name-alias nv)
+        (maybe-substitute-value-alias nv)
+        (and (keyword? nv) (name nv))
+        nv)))
+
+(defmethod op->filter-exp-str :default [arg args]
+  (cons arg args))
+
+(defn- %comparator-and-or [op args & {:keys [subst-fn] :or {subst-fn identity}}]
+  ;; all comparators, AND, OR
+  (str "("
+       (->> (-> (name op)
+                clojure.string/upper-case
+                (interpose (subst-fn (filter-exp->filter-exp-str args))))
+            (interpose \space)
+            (apply str))
+       ")"))
+
+(defmethod op->filter-exp-str :comparator [op args]
+  (%comparator-and-or op args :subst-fn maybe-substitute-aliases))
+
+(defmethod op->filter-exp-str :and-or [op args]
+  (%comparator-and-or op args))
+
+(defmethod op->filter-exp-str :not [op args]
+  (assert (= (count args) 1))
+  (str "(NOT " (first (filter-exp->filter-exp-str args)) ")"))
+
+(defmethod op->filter-exp-str :between [op args]
+  (assert (= (count args) 2))
+  (let [[attr and-exp] args]
+    (str "(" (maybe-substitute-name-alias attr (name attr)) " BETWEEN " and-exp ")")))
+
+(defmethod op->filter-exp-str :in [op args]
+  (assert (= (count args) 2))
+  ;; FIXME: arg1 can be attribute name or alias
+  ;;        arg2 are value aliases
+  (let [[arg1 arg2] (filter-exp->filter-exp-str args)]
+    (assert (coll? arg2))
+    (str "(" (maybe-substitute-name-alias arg1 (name arg1)) " IN ("
+         (apply str (interpose "," (map substitute-value-alias arg2)))
+         "))")))
+
+(defmethod op->filter-exp-str :function [op args]
+  (let [[path & args] (filter-exp->filter-exp-str args)]
+    (str "("
+         (-> (name op) (str/replace "-" "_"))
+         "("
+         (apply str (interpose "," `(~(maybe-substitute-name-alias path (name path))
+                                     ~@(map substitute-value-alias args))))
+         "))")))
+
+
+;;
 ;; Reading data
 ;;
 
@@ -597,24 +720,25 @@
     prim-kvs     - {<hash-key> <val>} or {<hash-key> <val> <range-key> <val>}.
     :attrs       - Attrs to return, [<attr> ...].
     :consistent? - Use strongly (rather than eventually) consistent reads?
-    :exp-attr-name-map - {<subst-attr-string> <attr-str>}, that can be substituted in filter-exp
-                <subst-attr-string> starts with #
-    :projection-exp - Comma seperated attribute names(or substituted names) to project.
+    :alias-attr-name-map - {<alias> <attr>}, that can be used in :projection-attrs
+    :projection-attrs - [<attr> ...]
 
   Ex)
     (dl/get-item :employee {:site-id \"4w\", :id \"yVSEkgAb9dDWtA\"}
-                 :projection-exp \"#fn, #sn, #e, #p, #d, #t, #i\"
-		 :exp-attr-name-map {\"#fn\" \"firstName\" \"#sn\" \"familyName\" \"#e\" \"emailAddress\" \"#p\" \"phoneNumber\" \"#d\" \"dateEmployment\" \"#t\" \"terminatedP\" \"#i\" \"id\"})
+                 :alias-attr-name-map {:fn :firstName :sn :familyName :e :emailAddress :p :phoneNumber
+                                     :d :dateEmployment :t :terminatedP :i :id}
+                 :projection-attrs [:fn :sn :e :p :d :t :i])
 "
-  [client-opts table prim-kvs & {:keys [attrs consistent? return-cc? exp-attr-name-map projection-exp]}]
+  [client-opts table prim-kvs & {:keys [attrs consistent? return-cc? alias-attr-name-map projection-attrs]}]
   (java->clojure (.getItem (db-client client-opts)
                            (utils/doto-cond (GetItemRequest. (name table)
                                                              (make-DynamoDB-parts :attribute-values prim-kvs)
                                                              consistent?)
                                             attrs            (.setAttributesToGet (mapv name attrs))
                                             return-cc?       (.setReturnConsumedCapacity cc-total)
-                                            exp-attr-name-map (.setExpressionAttributeNames exp-attr-name-map)
-                                            projection-exp   (.setProjectionExpression projection-exp)))))
+                                            alias-attr-name-map (.setExpressionAttributeNames (alias-attr-name-map->exp-map alias-attr-name-map))
+                                            projection-attrs (.setProjectionExpression
+                                                              (projection-attrs->exp projection-attrs alias-attr-name-map))))))
 
 (defn batch-get-item
   "Retrieves a batch of items in a single request.
@@ -654,17 +778,17 @@
     :limit         - Max num >=1 of items to eval (≠ num of matching items).
                      Useful to prevent harmful sudden bursts of read activity.
     :consistent?   - Use strongly (rather than eventually) consistent reads?
+    :alias-attr-name-map - {<alias> <attr>}, that can be used in filter-exp and projection-attrs.
+    :alias-attr-value-map - {<alias> <val>}, that can be used in filter-exp.
+    :projection-attrs - [<attr> ...]
+    :filter-exp    - Prefixed expression with:
+                        #{:= :<> :< :<= :> :>= :and :or :not :exists :not-exists :begins-with :contains :between :in}
+                For available comparators and functions, see
+http://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Expressions.SpecifyingConditions.html#ConditionExpressionReference
 
-    :exp-attr-name-map - {<subst-attr-string> <attr-str>}, that can be substituted in filter-exp
-                <subst-attr-string> starts with #
-    :exp-attr-val-map  - {<subst-var-string> <val>}, that can be substituted in filter-exp
-                <subst-var-string> starts with :
-    :filter-exp    - A string expression which uses subst variables in exp-attr-*-map
-                For available comparators and functions, see http://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Expressions.SpecifyingConditions.html#ConditionExpressionReference
-    :projection-exp - Comma seperated attribute names(or substituted names) to project.
-
-  Note: the newly added exp-attr-*-map and filter-exp might be the Amazon's preferred way of doing filtering.
-        Only one of query-filter(and logical-op) or filter-exp(and exp-attr-*-map) has to exist in a query/scan.
+  Note: the newly added :alias-attr-name-map, :alias-attr-value-map, :filter-exp, and :projection-attrs are
+        Amazon's preferred way of doing filtering.
+        Only one of query-filter or filter-exp has to exist in a query/scan.
 
   (create-table client-opts :my-table [:name :s]
     {:range-keydef [:age :n] :block? true})
@@ -675,7 +799,7 @@
                                 :age  [:between [10 30]]})
   => [{:age 24, :name \"Steve\"}]
 
-  comparison-operators e/o #{:eq :le :lt :ge :gt :begins-with :between}.
+  The old style comparison-operators e/o #{:eq :le :lt :ge :gt :begins-with :between}.
 
   For unindexed item retrievel see `scan`.
 
@@ -691,14 +815,15 @@
               :filter-exp \"#f = :fn AND #s = :id\")
     (dl/query :employee {:site-id [:eq \"4w\"]}
               :index :family-name-index
-              :projection-exp \"#fn, #sn, #e, #p, #d, #t, #i\"
-	      :exp-attr-name-map {\"#a\" \"active?\" \"#fn\" \"firstName\" \"#sn\" \"familyName\" \"#e\" \"emailAddress\" \"#p\" \"phoneNumber\" \"#d\" \"dateEmployment\" \"#t\" \"terminatedP\" \"#i\" \"id\"}
-	      :exp-attr-val-map {\":active\" true}
-	      :filter-exp \"#a = :active\")
+              :alias-attr-name-map {:fn :firstName      :sn :familyName         :e :emailAddress
+                                    :p :phoneNumber     :d :dateEmployment      :t :terminatedP         :a :active?}
+              :alias-attr-value-map {:active true}
+              :projection-attrs [:fn :sn :e :p :d :t :id]
+              :filter-exp [:= :a :active])
 "
   [client-opts table prim-key-conds
    & {:keys [last-prim-kvs query-filter logical-op span-reqs return index order limit consistent?
-             return-cc? filter-exp exp-attr-name-map exp-attr-val-map projection-exp] :as opts
+             return-cc? alias-attr-name-map alias-attr-value-map projection-attrs filter-exp] :as opts
       :or   {span-reqs {:max 5}
              order     :asc}}]
   (letfn [(run1 [last-prim-kvs]
@@ -717,10 +842,15 @@
                                 (vector? return) (.setAttributesToGet (mapv name return))
                                 (keyword? return) (.setSelect (keyword->DynamoDB-enum-str return))
                                 return-cc?      (.setReturnConsumedCapacity cc-total)
-                                exp-attr-name-map (.setExpressionAttributeNames exp-attr-name-map)
-                                exp-attr-val-map (.setExpressionAttributeValues (make-DynamoDB-parts :attribute-values exp-attr-val-map))
-                                filter-exp (.setFilterExpression filter-exp)
-                                projection-exp   (.setProjectionExpression projection-exp)))))]
+                                alias-attr-name-map (.setExpressionAttributeNames (alias-attr-name-map->exp-map alias-attr-name-map))
+                                alias-attr-value-map (.setExpressionAttributeValues
+                                                      (make-DynamoDB-parts :attribute-values
+                                                                           (alias-attr-value-map->exp-map alias-attr-value-map)))
+                                filter-exp (.setFilterExpression (filter-exp->filter-exp-str filter-exp
+                                                                                             :name-aliases alias-attr-name-map
+                                                                                             :value-aliases alias-attr-value-map))
+                                projection-attrs   (.setProjectionExpression
+                                                    (projection-attrs->exp projection-attrs alias-attr-name-map))))))]
     (merge-more run1 span-reqs (run1 last-prim-kvs) limit)))
 
 (defn scan
@@ -736,19 +866,20 @@
                             [<attr> ...]}.
     :total-segments - Total number of parallel scan segments.
     :segment        - Calling worker's segment number (>=0, <=total-segments).
-    :exp-attr-name-map - {<subst-attr-string> <attr-str>}, that can be substituted in filter-exp
-                <subst-attr-string> starts with #
-    :exp-attr-val-map  - {<subst-var-string> <val>}, that can be substituted in filter-exp
-                <subst-var-string> starts with :
-    :filter-exp    - A string expression which uses subst variables in exp-attr-*-map
-                For available comparators and functions, see http://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Expressions.SpecifyingConditions.html#ConditionExpressionReference
-    :projection-exp - Comma seperated attribute names(or substituted names) to project.
+    :alias-attr-name-map - {<alias> <attr>}, that can be used in filter-exp and projection-attrs.
+    :alias-attr-value-map - {<alias> <val>}, that can be used in filter-exp.
+    :projection-attrs - [<attr> ...]
+    :filter-exp    - Prefixed expression with:
+                        #{:= :<> :< :<= :> :>= :and :or :not :exists :not-exists :begins-with :contains :between :in}
+                For available comparators and functions, see
+http://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Expressions.SpecifyingConditions.html#ConditionExpressionReference
 
-  Note: the newly added exp-attr-*-map and filter-exp might be the Amazon's preferred way of doing filtering.
-        Only one of attr-cond(and logical-op) or filter-exp(and exp-attr-*-map) has to exist in a query/scan.
+  Note: the newly added :alias-attr-name-map, :alias-attr-value-map, :filter-exp, and :projection-attrs are
+        Amazon's preferred way of doing filtering.
+        Only one of query-filter or filter-exp has to exist in a query/scan.
 
-  comparison-operators e/o #{:eq :le :lt :ge :gt :begins-with :between :ne
-                             :not-null :null :contains :not-contains :in}.
+  The old style comparison-operators e/o
+         #{:eq :le :lt :ge :gt :begins-with :between :ne :not-null :null :contains :not-contains :in}.
 
   (create-table client-opts :my-table [:name :s]
     {:range-keydef [:age :n] :block? true})
@@ -772,15 +903,16 @@
 	     :exp-attr-val-map {\":fn\" \"Louis\" \":id\" \"4w\"}
 	     :filter-exp \"#f = :fn AND #s = :id\")
     (dl/scan :employee
-             :index :family-name-index
-             :projection-exp \"#fn, #sn, #e, #p, #d, #t, #i\"
-	     :exp-attr-name-map {\"#a\" \"active?\" \"#fn\" \"firstName\" \"#sn\" \"familyName\" \"#e\" \"emailAddress\" \"#p\" \"phoneNumber\" \"#d\" \"dateEmployment\" \"#t\" \"terminatedP\" \"#i\" \"id\"}
-	     :exp-attr-val-map {\":active\" true}
-	     :filter-exp \"#a = :active\")
+              :index :family-name-index
+              :alias-attr-name-map {:fn :firstName      :sn :familyName         :e :emailAddress
+                                    :p :phoneNumber     :d :dateEmployment      :t :terminatedP         :a :active?}
+              :alias-attr-value-map {:active true}
+              :projection-attrs [:fn :sn :e :p :d :t :id]
+              :filter-exp [:= :a :active])
 "
   [client-opts table
    & {:keys [attr-conds logical-op last-prim-kvs span-reqs return limit total-segments
-             segment return-cc? filter-exp exp-attr-name-map exp-attr-val-map projection-exp] :as opts
+             segment return-cc? alias-attr-name-map alias-attr-value-map projection-attrs filter-exp] :as opts
       :or   {span-reqs {:max 5}}}]
   (letfn [(run1 [last-prim-kvs]
             (java->clojure
@@ -796,10 +928,15 @@
                                 (vector? return) (.setAttributesToGet (mapv name return))
                                 (keyword? return) (.setSelect (keyword->DynamoDB-enum-str return))
                                 return-cc?     (.setReturnConsumedCapacity cc-total)
-                                exp-attr-name-map (.setExpressionAttributeNames exp-attr-name-map)
-                                exp-attr-val-map (.setExpressionAttributeValues (make-DynamoDB-parts :attribute-values exp-attr-val-map))
-                                filter-exp (.setFilterExpression filter-exp)
-                                projection-exp   (.setProjectionExpression projection-exp)))))]
+                                alias-attr-name-map (.setExpressionAttributeNames (alias-attr-name-map->exp-map alias-attr-name-map))
+                                alias-attr-value-map (.setExpressionAttributeValues
+                                                      (make-DynamoDB-parts :attribute-values
+                                                                           (alias-attr-value-map->exp-map alias-attr-value-map)))
+                                filter-exp (.setFilterExpression (filter-exp->filter-exp-str filter-exp
+                                                                                             :name-aliases alias-attr-name-map
+                                                                                             :value-aliases alias-attr-value-map))
+                                projection-attrs   (.setProjectionExpression
+                                                    (projection-attrs->exp projection-attrs alias-attr-name-map))))))]
     (merge-more run1 span-reqs (run1 last-prim-kvs) limit)))
 
 ;;
