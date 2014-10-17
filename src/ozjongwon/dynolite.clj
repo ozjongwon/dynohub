@@ -84,39 +84,4 @@
   (when-not (describe-table table-name)
     (apply create-table table-name hash-keydef opts)))
 
-(defn pagination-query [table prim-key-conds start length & {:keys [projection-alias-attr-name-map filter-alias-attr-name-map] :as opts}]
-  (let [;; DynamoDB does not like unused attr-name in alias-attr-name-map
-        new-opts-map (as-> (dissoc opts :projection-alias-attr-name-map :filter-alias-attr-name-map) opts
-                           (if (:filter-exp opts)
-                             (assoc opts :alias-attr-name-map filter-alias-attr-name-map)
-                             opts))
-
-        count-opts (->> (dissoc new-opts-map :projection-attrs)
-                        (mapcat seq)
-                        (concat [:return :count]))
-
-        {records-total :scanned-count records-filtered :count}
-        (-> (apply query table prim-key-conds count-opts)
-            meta
-            (select-keys [:scanned-count :count]))
-
-        item-query-opts (->> (if (:projection-attrs new-opts-map)
-                               (update-in new-opts-map [:alias-attr-name-map] merge projection-alias-attr-name-map)
-                               new-opts-map)
-                             (mapcat seq))
-
-        result (cond (zero? records-total) []
-                     (zero? start) (apply query table prim-key-conds (concat item-query-opts [:limit length]))
-                     :else (let [last-prim-kvs (-> (apply query table prim-key-conds
-                                                          (concat count-opts [:limit (max start (- start length))]))
-                                                   meta
-                                                   :last-prim-kvs)]
-                             (if (nil? last-prim-kvs)
-                               []
-                               (->> (vector :last-prim-kvs last-prim-kvs)
-                                    (concat item-query-opts [:limit length])
-                                    (apply query table prim-key-conds)))))]
-
-    (with-meta result (assoc (meta result) :records-total records-total :records-filtered records-filtered))))
-
 ;;; DYNOLITE.CLJ ends here
