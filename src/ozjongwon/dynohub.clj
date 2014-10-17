@@ -703,12 +703,11 @@
 
 (defmethod op->filter-exp-str :function [op args]
   (let [[path & args] (filter-exp->filter-exp-str args)]
-    (str "("
-         (-> (name op) (str/replace "-" "_"))
+    (str (-> (name op) (str/replace "-" "_"))
          "("
          (apply str (interpose "," `(~(maybe-substitute-name-alias path (name path))
                                      ~@(map substitute-value-alias args))))
-         "))")))
+         ")")))
 
 
 ;;
