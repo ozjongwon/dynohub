@@ -503,7 +503,7 @@
                       :throughput _}].
     :block?       - Block for table to actually be active?
 
-  Additional examples:
+  Additional examples (using dynolite) :
 
         (dl/create-table :employee1 [:site-uid :s]
 				     :range-keydef [:uid :s]
@@ -619,6 +619,8 @@
 (def ^:dynamic *value-aliases*)
 
 (defn filter-exp->filter-exp-str [exp & {:keys [name-aliases value-aliases]}]
+  (when (and name-aliases value-aliases)
+    (assert (empty? (select-keys name-aliases (keys value-aliases))) (str "Duplicated aliases in :alias-attr-name-map and :alias-attr-value-map - " (keys (select-keys name-aliases (keys value-aliases))))))
   (binding [*name-aliases* (if (bound? #'*name-aliases*)
                              *name-aliases*
                              name-aliases)
@@ -722,7 +724,8 @@
     :alias-attr-name-map - {<alias> <attr>}, that can be used in :projection-attrs
     :projection-attrs - [<attr> ...]
 
-  Ex)
+  Additional examples (using dynolite) :
+
     (dl/get-item :employee {:site-id \"4w\", :id \"yVSEkgAb9dDWtA\"}
                  :alias-attr-name-map {:fn :firstName :sn :familyName :e :emailAddress :p :phoneNumber
                                      :d :dateEmployment :t :terminatedP :i :id}
@@ -804,7 +807,7 @@ http://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Expressions.Spec
 
   Ref. http://goo.gl/XfGKW for query+scan best practices.
 
-  Additional examples:
+  Additional examples (using dynolite) :
 
     (dl/query :employee {:site-uid [:eq \"4w\"]} :query-filter {:phoneNumber :not-null})
     (dl/query :employee {:site-uid [:eq \"4w\"]} :query-filter {:emailAddress [:contains \"Super\"]} :limit 10)
@@ -893,7 +896,7 @@ http://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Expressions.Spec
 
   Ref. http://goo.gl/XfGKW for query+scan best practices.
 
-  Additional examples:
+  Additional examples (using dynolite) :
 
     (dl/scan :employee :attr-conds {:emailAddress [:contains \"Super\"]} :limit 100)
     (dl/scan :employee :attr-conds {:emailAddress :null})
